@@ -1,0 +1,7 @@
+# Per-computer data: never in the repository
+logs/
+settings.json
+settings.demo.json
+*.tmp
+# Generated
+__pycache__/
