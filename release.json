@@ -1,23 +1,23 @@
 {
-  "version": "0.4.0",
-  "commit": "1ea1976ef016b86c511e45411d0eaf82d9584d6c",
-  "date": "2026-11-25T23:21:45+00:00",
-  "notes": "Wavelength scans, saved runs with shareable reports, sourced presets, and self-updating",
+  "version": "0.4.1",
+  "commit": "20371bc9a10086057ba182f0d3f3eb56a8f84238",
+  "date": "2026-11-25T23:44:57+00:00",
+  "notes": "Recognizes the GENESYS 20's ER (not supported) reply",
   "files": [
     {
       "path": "app.py",
-      "sha256": "f35aae30cc7169bce5433dbd371b5128f14fcfd36b1184b6a56d3c323254ec2a",
-      "size": 120401
+      "sha256": "9255979f834b9b3ce03608df6c9ef038207653b74a83fc7c98010ee092dd89e9",
+      "size": 121028
     },
     {
       "path": "genesys.py",
-      "sha256": "18b4dd41934299242b51e18f5979c4b438a88a078d6637d04cb76589f6b4c8ef",
-      "size": 12831
+      "sha256": "6600f82a9200d64eb228f2f7773addf639c537ff8b26302e7a77a18b651d41ca",
+      "size": 13096
     },
     {
       "path": "link.py",
-      "sha256": "649d7d0e83da0e55b690966f0e7fc17959d3f8f8c858066c8a391180937a0b33",
-      "size": 9615
+      "sha256": "2863b3bdb45290ebba955aa7c4c1bf505a048a8ef399a4d1689fdfeddcf903a4",
+      "size": 9953
     },
     {
       "path": "analysis.py",
@@ -46,7 +46,7 @@
     },
     {
       "path": "version.py",
-      "sha256": "aff5c3ea2a903c8db55f35f824d0b1f9b0d580c9b58cdee547d19fb8b8a2c62b",
+      "sha256": "237146fa68b05caa944681974ffa07b72084b8b26b67ff5271f4eb7fe961f187",
       "size": 96
     },
     {
