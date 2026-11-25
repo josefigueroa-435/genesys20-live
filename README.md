@@ -45,6 +45,33 @@ set its wavelength, so type the wavelength you set into the Sample box.
 - **Spectrum**: step the wavelength by hand (re-blank at each), type it in, and add the reading.
   λmax is refined with a parabola through the top three points.
 
+## Troubleshooting the cable (tools folder)
+
+Run these with the app disconnected (they need the port). Replace COM12 with your port.
+
+- `py tools\loopback_check.py COM12 9600 300` sends `MODEL` once a second for 300 s and logs echoes,
+  receive errors and signal-line changes. Bridge pins 2 and 3 of the 9-pin end that normally plugs
+  into the GENESYS: an echo means the adapter (and cable, if bridged at its far end) can carry data.
+  A 2-3 loopback echoes whether or not the wiring is swapped.
+- `py tools\send_test.py COM12` waits until CD is on (adapter on the GENESYS), then sends `MODEL` at
+  correct and deliberately wrong settings. If our wire reaches the GENESYS, its display flashes
+  "Parity error" / "Framing error" (user guide p. 12).
+- `py tools\line_check.py COM12 9600 120` shows the signal lines and listens while you press Print.
+
+What was found on 2026-11-25 with the DTECH USB adapter (female DB9, Prolific PL2303 `067B:2303`):
+
+- Plugged straight onto the GENESYS: no data in either direction, and no Parity/Framing error on the
+  GENESYS display, although the CD line follows the GENESYS (on when attached).
+- Holes 2-3 bridged (with solid contact): clean echoes, so the adapter itself works.
+- Holes 2-7 bridged: CTS blinked in time with each transmitted `MODEL` and there were no receive errors,
+  so **the adapter transmits on pin 2**, i.e. it is wired as DCE. The GENESYS is also DCE (it
+  transmits on pin 2, service manual p. 4-12), so transmit meets transmit.
+- **Fix:** put a **DB9 null-modem adapter, male-to-female**, between the DTECH and the GENESYS.
+  Alternative: a standard USB-RS232 adapter with a male DB9 plus a female-female gender changer
+  (Thermo's own cable is a straight-through female-female, part 336042).
+- The adapter once failed to start (Code 10) and came back on re-plugging. The COM number changes when
+  you use a different USB socket (COM11 vs COM12), so press the refresh button next to Port.
+
 ## Files
 
 - `logs/raw-*.jsonl`: every byte in and out, with time stamps (written as it arrives).
