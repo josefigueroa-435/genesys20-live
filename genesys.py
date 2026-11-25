@@ -8,9 +8,14 @@ What the manuals say (Thermo GENESYS 20 user guide 269-223100 Rev A p. 6, servic
   OFF, Internal, Parallel, Serial; format: Print WL yes/no, Print Units yes/no, decimal point).
 - Print on a screen that isn't showing data prints that screen's parameters (e.g. the RS232 settings).
 
-Third-party (datalyse.dk, GENESYS 20 firmware 1.11), NOT in Thermo's user guide: the commands
-MODEL (model), REV (software version) and SND (send the absorbance). There is no scan command and
-no command that reports the wavelength. Treat these as unverified until this instrument answers.
+Queries (from datalyse.dk, not in Thermo's user guide) VERIFIED on Jose's GENESYS 20 (model 4001/4,
+firmware "Revision = 2.10") on 2026-11-25 at 9600 8N1, CR+LF: every query is echoed, then answered,
+then closed with "OK".  MODEL -> "GENESYS 20";  REV -> "GENESYS 20 Revision = 2.10";
+SND -> the absorbance with 4 decimals, e.g. "0.0003". There is no scan command and no command that
+reports the wavelength.
+
+Wiring lesson: the GENESYS is DCE (transmits on pin 2). Jose's DTECH female USB adapter is ALSO wired
+DCE, so it only works through a male-to-female null-modem adapter.
 """
 from __future__ import annotations
 
@@ -256,8 +261,9 @@ class SimulatedCuvette:
 
 
 class SimulatedGenesys:
-    """Stands in for the serial port in --demo and in tests. It answers SND/MODEL/REV and prints
-    on press_print(). Its output layout is made up: the real one has not been captured yet."""
+    """Stands in for the serial port in --demo and in tests. It answers SND/MODEL/REV exactly like
+    the real GENESYS 20 (echo, answer, OK) and prints on press_print(). The Print layout is still
+    made up: the real one has not been captured yet."""
 
     def __init__(self, cuvette: SimulatedCuvette | None = None, terminator: bytes = b"\r\n",
                  noise: float = 0.0015, seed: int | None = None, clock=time.monotonic,
@@ -313,14 +319,17 @@ class SimulatedGenesys:
 
     def _command(self, cmd: str):
         self.received.append(cmd)
+        self._out += cmd.encode() + self.term          # the real instrument echoes each query
         if cmd == "SND":
-            self._out += f"{self.absorbance():7.3f}".encode() + self.term
+            self._out += f"{self.absorbance():.4f}".encode() + self.term
         elif cmd == "MODEL":
             self._out += b"GENESYS 20 (SIMULATED)" + self.term
         elif cmd == "REV":
-            self._out += b"1.11-SIM" + self.term
+            self._out += b"GENESYS 20 Revision = 2.10-SIM" + self.term
         else:
             self._out += b"?" + self.term
+            return
+        self._out += b"OK" + self.term
 
     def press_print(self):
         a = self.absorbance()

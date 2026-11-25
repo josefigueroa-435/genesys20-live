@@ -1,11 +1,24 @@
 """The serial link: one worker thread owns the port, splits what arrives into lines, and (only when
 asked) sends the read-only queries SND, MODEL and REV.
 
+How the real GENESYS 20 answers (firmware 2.10, captured 2026-11-25 at 9600 8N1, CR+LF):
+    -> SND\\r\\n
+    <- SND\\r\\n        echo of the query
+    <- 0.0003\\r\\n     the answer (absorbance, 4 decimals)
+    <- OK\\r\\n         end of the answer
+MODEL answers "GENESYS 20", REV answers "GENESYS 20 Revision = 2.10". The echo is skipped, answer
+lines are tagged with their query, and OK closes the query. A query that gets an answer but no OK
+is closed after ANSWER_IDLE_S of quiet, so firmware that leaves out the OK still works.
+
+The GENESYS echoes every character the moment it arrives, even in the middle of an answer (two
+queries sent back to back came out as "GENESRYS 20" / "OKE"). So queries wait in an outbox and only
+one is ever in flight: the next is written after the previous one's OK (or timeout).
+
 Events for the GUI arrive on `Link.events` as tuples:
     ("in", t, bytes)                    raw chunk received
     ("out", t, bytes)                   raw query sent
     ("line", t, bytes, source, cmd)     a complete line; source is "print" or "reply" (cmd = the query)
-    ("timeout", t, cmd)                 a query got no reply in time
+    ("timeout", t, cmd)                 a query got no answer in time
     ("error", t, message)               the port failed; the link has closed itself
     ("closed", t)
 t is time.time().
@@ -19,8 +32,19 @@ from collections import deque
 
 from genesys import READ_ONLY_COMMANDS, TERMINATORS, LineAssembler, SerialSettings
 
-REPLY_TIMEOUT_S = 2.5
+REPLY_TIMEOUT_S = 3.0      # no answer at all within this -> timeout
+ANSWER_IDLE_S = 0.8        # answered but no OK: close the query after this much quiet
 IDLE_FLUSH_S = 0.4
+
+
+class _Query:
+    __slots__ = ("cmd", "t_sent", "answered", "t_last")
+
+    def __init__(self, cmd: str, t_sent: float):
+        self.cmd = cmd
+        self.t_sent = t_sent
+        self.answered = False
+        self.t_last = t_sent
 
 
 def open_serial(s: SerialSettings):
@@ -38,7 +62,8 @@ class Link:
         self.poll_interval = 0.0          # seconds between SND queries; 0 = off
         self._port = None
         self._lock = threading.Lock()     # guards writes and _pending
-        self._pending: deque = deque()    # (cmd, t_sent)
+        self._pending: deque = deque()    # the query in flight (at most one)
+        self._outbox: deque = deque()     # queries waiting their turn
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._next_poll = 0.0
@@ -54,6 +79,7 @@ class Link:
         self.settings = settings
         self._port = port if port is not None else open_serial(settings)
         self._pending.clear()
+        self._outbox.clear()
         self._stop.clear()
         self._next_poll = time.monotonic() + 0.5
         self._thread = threading.Thread(target=self._loop, name="genesys-link", daemon=True)
@@ -73,16 +99,24 @@ class Link:
             self.events.put(("closed", time.time()))
 
     def send(self, cmd: str) -> None:
-        """Send one of the read-only queries. Anything else is refused."""
+        """Queue one of the read-only queries; anything else is refused. The worker thread writes it
+        as soon as no other query is in flight."""
         if cmd not in READ_ONLY_COMMANDS:
             raise ValueError(f"{cmd!r} is not one of the read-only queries {READ_ONLY_COMMANDS}")
-        port = self._port
-        if port is None:
+        if self._port is None:
             raise RuntimeError("not connected")
-        data = cmd.encode("ascii") + TERMINATORS[self.settings.terminator]
         with self._lock:
+            self._outbox.append(cmd)
+
+    def _write_next(self, port) -> None:
+        """Worker thread: write the next queued query if nothing is in flight."""
+        with self._lock:
+            if self._pending or not self._outbox:
+                return
+            cmd = self._outbox.popleft()
+            data = cmd.encode("ascii") + TERMINATORS[self.settings.terminator]
             port.write(data)
-            self._pending.append((cmd, time.monotonic()))
+            self._pending.append(_Query(cmd, time.monotonic()))
         self.events.put(("out", time.time(), data))
 
     def _loop(self) -> None:
@@ -93,6 +127,7 @@ class Link:
             if port is None:
                 break
             try:
+                self._write_next(port)
                 data = port.read(256)
             except Exception as exc:  # unplugged, driver error...
                 self.events.put(("error", time.time(), f"{type(exc).__name__}: {exc}"))
@@ -115,7 +150,7 @@ class Link:
             if self.poll_interval > 0 and now >= self._next_poll:
                 self._next_poll = now + self.poll_interval
                 with self._lock:
-                    waiting = any(c == "SND" for c, _ in self._pending)
+                    waiting = any(q.cmd == "SND" for q in self._pending) or "SND" in self._outbox
                 if not waiting:
                     try:
                         self.send("SND")
@@ -123,14 +158,34 @@ class Link:
                         self.events.put(("error", time.time(), f"could not send SND: {exc}"))
 
     def _emit_line(self, line: bytes) -> None:
-        if not line.strip():
+        text = line.strip()
+        if not text:
             return
+        now = time.monotonic()
         with self._lock:
-            cmd = self._pending.popleft()[0] if self._pending else None
-        self.events.put(("line", time.time(), line, "reply" if cmd else "print", cmd))
+            q = self._pending[0] if self._pending else None
+            if q is not None:
+                word = text.decode("latin-1").upper()
+                if word == q.cmd and not q.answered:
+                    q.t_last = now                 # the instrument echoing our query
+                    return
+                if word == "OK":
+                    self._pending.popleft()        # end of this query's answer
+                    if not q.answered:
+                        self.events.put(("timeout", time.time(), q.cmd))
+                    return
+                q.answered = True
+                q.t_last = now
+        self.events.put(("line", time.time(), line, "reply" if q else "print", q.cmd if q else None))
 
     def _expire(self, now: float) -> None:
         with self._lock:
-            while self._pending and now - self._pending[0][1] > REPLY_TIMEOUT_S:
-                cmd, _ = self._pending.popleft()
-                self.events.put(("timeout", time.time(), cmd))
+            while self._pending:
+                q = self._pending[0]
+                if q.answered and now - q.t_last > ANSWER_IDLE_S:
+                    self._pending.popleft()        # answered, no OK came: close it quietly
+                elif not q.answered and now - q.t_sent > REPLY_TIMEOUT_S:
+                    self._pending.popleft()
+                    self.events.put(("timeout", time.time(), q.cmd))
+                else:
+                    break

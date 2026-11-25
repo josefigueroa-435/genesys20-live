@@ -23,9 +23,11 @@ dye) so you can try every tab without hardware; everything it shows is labelled 
 ## Hands-free readings
 
 Tick **Ask for a reading every N s**. The app then sends `SND`, a read-only query that returns the
-absorbance. `SND`, `MODEL` and `REV` come from a third-party description of the GENESYS 20 (firmware
-1.11), not from Thermo's user guide, so they may not work on every unit. If the GENESYS doesn't answer
-three times, polling turns itself off and Print keeps working.
+absorbance to 4 decimals. `SND`, `MODEL` and `REV` aren't in Thermo's user guide, but they were
+checked on this GENESYS 20 (model 4001/4, firmware "Revision = 2.10") on 2026-11-25: each query is
+echoed, answered, then closed with `OK`, and SND answered about once a second without a miss. The
+GENESYS echoes characters as they arrive, so the app sends one query at a time. If the GENESYS
+doesn't answer three times, polling turns itself off and Print keeps working.
 
 The app refuses to send anything except these three queries (`genesys.READ_ONLY_COMMANDS`), so it can
 never change the instrument's wavelength, blank or settings. The GENESYS 20 has no command to report or
@@ -66,7 +68,8 @@ What was found on 2026-11-25 with the DTECH USB adapter (female DB9, Prolific PL
 - Holes 2-7 bridged: CTS blinked in time with each transmitted `MODEL` and there were no receive errors,
   so **the adapter transmits on pin 2**, i.e. it is wired as DCE. The GENESYS is also DCE (it
   transmits on pin 2, service manual p. 4-12), so transmit meets transmit.
-- **Fix:** put a **DB9 null-modem adapter, male-to-female**, between the DTECH and the GENESYS.
+- **Fix (confirmed working):** a **DB9 null-modem adapter, male-to-female**, between the DTECH and
+  the GENESYS (a missing pin 9, Ring Indicator, doesn't matter). Chain: USB, DTECH, null-modem, GENESYS.
   Alternative: a standard USB-RS232 adapter with a male DB9 plus a female-female gender changer
   (Thermo's own cable is a straight-through female-female, part 336042).
 - The adapter once failed to start (Code 10) and came back on re-plugging. The COM number changes when

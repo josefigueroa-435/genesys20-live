@@ -187,6 +187,93 @@ class TestSessionLog(unittest.TestCase):
             self.assertIn("SIMULATED", os.path.basename(log.path))
 
 
+class ScriptedPort:
+    """Replays the exact bytes captured from the real GENESYS 20 (2026-11-25) for each query."""
+
+    REAL = {b"SND": b"SND\r\n0.0003\r\nOK\r\n", b"MODEL": b"MODEL\r\nGENESYS 20\r\nOK\r\n",
+            b"REV": b"REV\r\nGENESYS 20 Revision = 2.10\r\nOK\r\n"}
+
+    def __init__(self, replies=None):
+        self.replies = self.REAL if replies is None else replies
+        self.out = bytearray()
+        self.is_open = True
+
+    writes_while_busy = 0
+
+    def write(self, data):
+        if self.out.strip(b"\r\n"):        # still answering: the real GENESYS would garble this
+            self.writes_while_busy += 1
+        self.out += self.replies.get(data.strip(), b"")
+        return len(data)
+
+    def read(self, n):
+        if not self.out:
+            time.sleep(0.005)
+        chunk, self.out[:] = bytes(self.out[:3]), self.out[3:]     # dribble 3 bytes at a time
+        return chunk
+
+    def close(self):
+        self.is_open = False
+
+
+class TestRealProtocol(unittest.TestCase):
+    def run_query(self, port, cmd, wait=1.5):
+        link = Link()
+        link.open(g.SerialSettings(port="X"), port=port)
+        try:
+            link.send(cmd)
+            end, evs = time.time() + wait, []
+            while time.time() < end:
+                try:
+                    evs.append(link.events.get(timeout=0.05))
+                except Exception:
+                    pass
+        finally:
+            link.close()
+        return evs
+
+    def test_captured_snd_bytes(self):
+        evs = self.run_query(ScriptedPort(), "SND")
+        lines = [e for e in evs if e[0] == "line"]
+        self.assertEqual([(g.decode(e[2]), e[3], e[4]) for e in lines], [("0.0003", "reply", "SND")])
+        r = g.parse_line("0.0003")
+        self.assertEqual((r.value, r.kind), (0.0003, "A"))
+        self.assertFalse(any(e[0] == "timeout" for e in evs))
+
+    def test_back_to_back_queries_never_overlap(self):
+        port = ScriptedPort()
+        link = Link()
+        link.open(g.SerialSettings(port="X"), port=port)
+        try:
+            for cmd in ("MODEL", "REV", "SND", "SND"):
+                link.send(cmd)
+            end, evs = time.time() + 2.0, []
+            while time.time() < end:
+                try:
+                    evs.append(link.events.get(timeout=0.05))
+                except Exception:
+                    pass
+        finally:
+            link.close()
+        self.assertEqual(port.writes_while_busy, 0)
+        got = [(e[4], g.decode(e[2])) for e in evs if e[0] == "line"]
+        self.assertEqual(got, [("MODEL", "GENESYS 20"), ("REV", "GENESYS 20 Revision = 2.10"),
+                               ("SND", "0.0003"), ("SND", "0.0003")])
+
+    def test_answer_without_ok_still_closes(self):
+        evs = self.run_query(ScriptedPort({b"SND": b"SND\r\n0.1234\r\n"}), "SND", wait=2.0)
+        self.assertEqual([g.decode(e[2]) for e in evs if e[0] == "line"], ["0.1234"])
+        self.assertFalse(any(e[0] == "timeout" for e in evs))
+
+    def test_ok_without_answer_is_a_miss(self):
+        evs = self.run_query(ScriptedPort({b"SND": b"SND\r\nOK\r\n"}), "SND")
+        self.assertTrue(any(e[0] == "timeout" and e[2] == "SND" for e in evs))
+
+    def test_silence_times_out(self):
+        evs = self.run_query(ScriptedPort({}), "SND", wait=3.6)
+        self.assertTrue(any(e[0] == "timeout" for e in evs))
+
+
 class FakeClock:
     def __init__(self):
         self.t = 1000.0
@@ -220,10 +307,25 @@ class TestSimulatorAndLink(unittest.TestCase):
     def test_snd_reply_is_tagged(self):
         self.link.send("SND")
         evs = self.collect(["line"])
-        line = [e for e in evs if e[0] == "line"][0]
-        self.assertEqual((line[3], line[4]), ("reply", "SND"))
-        r = g.parse_line(g.decode(line[2]))
-        self.assertAlmostEqual(r.value, 0.874, places=3)    # 87000 * 1e-5 + baseline 0.004
+        lines = [e for e in evs if e[0] == "line"]
+        self.assertEqual(len(lines), 1)                      # the echo "SND" and the "OK" are not lines
+        self.assertEqual((lines[0][3], lines[0][4]), ("reply", "SND"))
+        r = g.parse_line(g.decode(lines[0][2]))
+        self.assertAlmostEqual(r.value, 0.874, places=4)    # 87000 * 1e-5 + baseline 0.004
+
+    def test_model_and_rev_in_order(self):
+        self.link.send("MODEL")
+        self.link.send("REV")
+        evs = self.collect(["line"], timeout=1.0)
+        time.sleep(0.3)
+        while True:
+            try:
+                evs.append(self.link.events.get_nowait())
+            except Exception:
+                break
+        got = [(e[4], g.decode(e[2])) for e in evs if e[0] == "line"]
+        self.assertEqual(got, [("MODEL", "GENESYS 20 (SIMULATED)"), ("REV", "GENESYS 20 Revision = 2.10-SIM")])
+        self.assertFalse(any(e[0] == "timeout" for e in evs))
 
     def test_print_is_tagged(self):
         self.sim.press_print()

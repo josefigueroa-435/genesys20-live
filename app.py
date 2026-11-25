@@ -52,7 +52,7 @@ from link import Link  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP_NAME = "GENESYS 20 Live"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 DEFAULTS = {
     "serial": g.SerialSettings().to_dict(),
@@ -67,13 +67,13 @@ DEFAULTS = {
     "species": "reactant",
     "eps": "",
     "mw": "",
-    "unit": "µM",
+    "unit": "ÂµM",
     "c0": "",
     "a_inf": "",
     "conc_method": "beer",
     "live_y": "Absorbance",
     "xunit": "s",
-    "cal_unit": "µM",
+    "cal_unit": "ÂµM",
     "standards": [],
     "spectrum": [],
     "kin_from": "",
@@ -81,7 +81,7 @@ DEFAULTS = {
     "geometry": "zoomed",
 }
 
-DEMO_SAMPLE = {"wl": "590", "eps": "87000", "unit": "µM", "species": "reactant", "a_inf": "0.004",
+DEMO_SAMPLE = {"wl": "590", "eps": "87000", "unit": "ÂµM", "species": "reactant", "a_inf": "0.004",
                "path": "1.000"}
 
 STATUS_STYLE = {
@@ -257,7 +257,7 @@ class App:
         ttk.Label(top, text="Port").pack(side="left")
         self.cb_port = ttk.Combobox(top, textvariable=self.v_port, width=34)
         self.cb_port.pack(side="left", padx=(2, 0))
-        ttk.Button(top, text="↻", width=3, command=self.refresh_ports).pack(side="left", padx=2)
+        ttk.Button(top, text="â†»", width=3, command=self.refresh_ports).pack(side="left", padx=2)
         self.btn_connect = ttk.Button(top, text="Connect", command=self.toggle_connect, width=12)
         self.btn_connect.pack(side="left", padx=(10, 6))
         self.lbl_status = tk.Label(top, text="", fg="white", bg="#6b7280", padx=8, pady=2,
@@ -336,7 +336,7 @@ class App:
         rows = [
             ("Wavelength set on GENESYS (nm)", ttk.Entry(grid, textvariable=self.v_wl, width=10)),
             ("Path length b (cm)", ttk.Entry(grid, textvariable=self.v_path, width=10)),
-            ("ε (L mol⁻¹ cm⁻¹) at that λ", ttk.Entry(grid, textvariable=self.v_eps, width=10)),
+            ("Îµ (L molâ»Â¹ cmâ»Â¹) at that Î»", ttk.Entry(grid, textvariable=self.v_eps, width=10)),
             ("Molar mass (g/mol, for mg/L)", ttk.Entry(grid, textvariable=self.v_mw, width=10)),
             ("Show concentration in", ttk.Combobox(grid, textvariable=self.v_unit, values=an.UNITS, width=8,
                                                   state="readonly")),
@@ -345,7 +345,7 @@ class App:
             ttk.Label(grid, text=lab).grid(row=i, column=0, sticky="w", pady=1)
             w.grid(row=i, column=1, sticky="w", padx=(6, 0), pady=1)
         ttk.Label(f, text="Concentration from", style="Head.TLabel").pack(anchor="w", pady=(6, 0))
-        ttk.Radiobutton(f, text="Beer-Lambert: c = A / (ε b)", value="beer",
+        ttk.Radiobutton(f, text="Beer-Lambert: c = A / (Îµ b)", value="beer",
                         variable=self.v_method).pack(anchor="w")
         ttk.Radiobutton(f, text="My calibration curve (Calibration tab)", value="cal",
                         variable=self.v_method).pack(anchor="w")
@@ -356,11 +356,11 @@ class App:
                         variable=self.v_species).pack(anchor="w")
         grid = ttk.Frame(f)
         grid.pack(fill="x", pady=(2, 0))
-        ttk.Label(grid, text="Final absorbance A∞ (optional)").grid(row=0, column=0, sticky="w")
+        ttk.Label(grid, text="Final absorbance Aâˆž (optional)").grid(row=0, column=0, sticky="w")
         ttk.Entry(grid, textvariable=self.v_ainf, width=10).grid(row=0, column=1, padx=(6, 0))
-        ttk.Label(grid, text="Starting conc. c₀ (in the unit above)").grid(row=1, column=0, sticky="w")
+        ttk.Label(grid, text="Starting conc. câ‚€ (in the unit above)").grid(row=1, column=0, sticky="w")
         ttk.Entry(grid, textvariable=self.v_c0, width=10).grid(row=1, column=1, padx=(6, 0))
-        ttk.Label(f, text="Leave ε empty to work in absorbance (first-order k doesn't need it).",
+        ttk.Label(f, text="Leave Îµ empty to work in absorbance (first-order k doesn't need it).",
                   style="Hint.TLabel", wraplength=300).pack(anchor="w", pady=(4, 0))
         for v in (self.v_wl, self.v_path, self.v_species, self.v_eps, self.v_mw, self.v_unit, self.v_c0,
                   self.v_ainf, self.v_method):
@@ -373,15 +373,15 @@ class App:
             self.v_sim_k = tk.StringVar(value="0.01")
             grid = ttk.Frame(f)
             grid.pack(fill="x")
-            ttk.Label(grid, text="Dye in cuvette (µM)").grid(row=0, column=0, sticky="w")
+            ttk.Label(grid, text="Dye in cuvette (ÂµM)").grid(row=0, column=0, sticky="w")
             ttk.Entry(grid, textvariable=self.v_sim_c, width=8).grid(row=0, column=1, padx=4)
             ttk.Button(grid, text="Put in", command=self.sim_put_in).grid(row=0, column=2)
-            ttk.Label(grid, text="Fading k (s⁻¹)").grid(row=1, column=0, sticky="w")
+            ttk.Label(grid, text="Fading k (sâ»Â¹)").grid(row=1, column=0, sticky="w")
             ttk.Entry(grid, textvariable=self.v_sim_k, width=8).grid(row=1, column=1, padx=4)
             ttk.Button(grid, text="Start reaction", command=self.sim_start).grid(row=1, column=2)
             ttk.Button(f, text="Press Print on the simulated GENESYS", command=self.sim_print).pack(
                 anchor="w", pady=(4, 0))
-            ttk.Label(f, text="The simulated dye has ε = 87,000 at 590 nm (a broad band); its wavelength "
+            ttk.Label(f, text="The simulated dye has Îµ = 87,000 at 590 nm (a broad band); its wavelength "
                               "follows the box above. Made-up numbers for trying the app.",
                       style="Hint.TLabel", wraplength=300).pack(anchor="w", pady=(4, 0))
 
@@ -443,7 +443,7 @@ class App:
         self.lbl_kin_basis.pack(fill="x", pady=(4, 0))
         cols = ("order", "k", "units", "r2", "half", "x0", "n")
         self.tv_kin = ttk.Treeview(tab, columns=cols, show="headings", height=3)
-        for c, (title, w) in zip(cols, [("Order", 150), ("k", 110), ("k units", 110), ("R²", 90),
+        for c, (title, w) in zip(cols, [("Order", 150), ("k", 110), ("k units", 110), ("RÂ²", 90),
                                          ("Half-life", 110), ("Start amount", 110), ("Points", 70)]):
             self.tv_kin.heading(c, text=title)
             self.tv_kin.column(c, width=w, anchor="center")
@@ -472,7 +472,7 @@ class App:
         ttk.Button(left, text="Add the current reading as this standard", command=self.add_standard).pack(
             fill="x", pady=4)
         self.tv_cal = ttk.Treeview(left, columns=("c", "a", "wl"), show="headings", height=7)
-        for c, t, w in (("c", "Concentration", 110), ("a", "Absorbance", 100), ("wl", "λ (nm)", 70)):
+        for c, t, w in (("c", "Concentration", 110), ("a", "Absorbance", 100), ("wl", "Î» (nm)", 70)):
             self.tv_cal.heading(c, text=t)
             self.tv_cal.column(c, width=w, anchor="center")
         self.tv_cal.pack(fill="x")
@@ -495,12 +495,12 @@ class App:
         self.nb.add(tab, text="Spectrum")
         left = ttk.Frame(tab, width=330)
         left.pack(side="left", fill="y", padx=(0, 6))
-        ttk.Button(left, text="Add the current reading at the wavelength box λ",
+        ttk.Button(left, text="Add the current reading at the wavelength box Î»",
                    command=self.add_spec_point).pack(fill="x")
         self.v_spec_auto = tk.BooleanVar(value=False)
         ttk.Checkbutton(left, text="Add every new reading here", variable=self.v_spec_auto).pack(anchor="w", pady=4)
         self.tv_spec = ttk.Treeview(left, columns=("wl", "a"), show="headings", height=8)
-        for c, t in (("wl", "λ (nm)"), ("a", "Absorbance")):
+        for c, t in (("wl", "Î» (nm)"), ("a", "Absorbance")):
             self.tv_spec.heading(c, text=t)
             self.tv_spec.column(c, width=110, anchor="center")
         self.tv_spec.pack(fill="x")
@@ -510,7 +510,7 @@ class App:
         ttk.Button(row, text="Clear all", command=self.clear_spec).pack(side="left", padx=4)
         self.lbl_spec = ttk.Label(left, text="", style="Sub.TLabel")
         self.lbl_spec.pack(fill="x", pady=4)
-        ttk.Button(left, text="Use λmax as the working wavelength", command=self.use_lmax).pack(fill="x")
+        ttk.Button(left, text="Use Î»max as the working wavelength", command=self.use_lmax).pack(fill="x")
         ttk.Label(left, text="The GENESYS 20 can't scan or report its wavelength over serial. Step the "
                              "wavelength by hand (re-blank at each one), type it in the wavelength box, "
                              "then add the reading. With 'Print WL = Yes', Print readings bring their own "
@@ -619,8 +619,8 @@ class App:
             self._raw(f"Could not send {cmd}: {exc}", "warn")
 
     def identify(self):
-        self.send("MODEL")
-        self.root.after(400, lambda: self.send("REV"))
+        self.send("MODEL")       # the link sends them one at a time
+        self.send("REV")
 
     def on_poll_toggle(self):
         want = self.v_poll.get()
@@ -633,10 +633,11 @@ class App:
             ok = messagebox.askyesno(
                 APP_NAME,
                 "Hands-free readings work by sending the query SND to the GENESYS every few seconds.\n\n"
-                "SND only asks for the current absorbance; it changes nothing on the instrument. It comes "
-                "from a third-party description of the GENESYS 20 (firmware 1.11), not Thermo's user guide, "
-                "so it may not work on every unit. If the GENESYS doesn't answer, the app turns this off "
-                "and you can keep using Print.\n\nTurn on hands-free readings?")
+                "SND only asks for the current absorbance (4 decimals); it changes nothing on the "
+                "instrument. It isn't in Thermo's user guide, but it was checked on this GENESYS 20 "
+                "(firmware 2.10). If the GENESYS stops answering, the app turns this off and you can "
+                "keep using Print.\n\nThe GENESYS can't report its wavelength, so keep the wavelength box "
+                "in the Sample section up to date.\n\nTurn on hands-free readings?")
             if not ok:
                 self.v_poll.set(False)
                 want = False
@@ -734,7 +735,7 @@ class App:
             self._add_spec(row["wl"], row["A"])
         self.lbl_verify.configure(text=f"Last reading as the app understood it:  {tagtxt}"
                                        + (f" at {r.wl:g} nm" if r.wl else "")
-                                       + f"      (raw text: “{r.text}”)")
+                                       + f"      (raw text: â€œ{r.text}â€)")
         if not self.demo:
             self._set_status("verified" if self.s.get("format_verified") else "bytes")
         self._dirty.update({"live", "cal"})
@@ -772,7 +773,8 @@ class App:
             self.lbl_sub.configure(text="(GENESYS in concentration mode)")
         else:
             a = row["A"]
-            self.lbl_big.configure(text=f"{a:.3f} A" if a is not None else "---")
+            places = 4 if row["source"] == "SND" else 3      # SND answers with 4 decimals
+            self.lbl_big.configure(text=f"{a:.{places}f} A" if a is not None else "---")
             parts = [f"{row['T']:.1f} %T"] if row["T"] is not None else []
             conc, cu, _ = self._conc_of(row)
             if conc is not None:
@@ -943,14 +945,14 @@ class App:
         if self.cal:
             f = self.cal.fit
             u = self.cal.unit
-            lines = [f"A = {fmt_sig(f.slope)} · c + {fmt_sig(f.intercept)}   (c in {u})",
-                     f"R² = {f.r2:.5f}   n = {f.n}"]
+            lines = [f"A = {fmt_sig(f.slope)} Â· c + {fmt_sig(f.intercept)}   (c in {u})",
+                     f"RÂ² = {f.r2:.5f}   n = {f.n}"]
             if self.cal.lod is not None:
-                lines.append(f"LOD ≈ {fmt_sig(self.cal.lod, 3)} {u}   LOQ ≈ {fmt_sig(self.cal.loq, 3)} {u}")
+                lines.append(f"LOD â‰ˆ {fmt_sig(self.cal.lod, 3)} {u}   LOQ â‰ˆ {fmt_sig(self.cal.loq, 3)} {u}")
             if self.cal.eps is not None:
-                lines.append(f"ε = slope / b = {fmt_sig(self.cal.eps)} L mol⁻¹ cm⁻¹")
+                lines.append(f"Îµ = slope / b = {fmt_sig(self.cal.eps)} L molâ»Â¹ cmâ»Â¹")
             if f.r2 < 0.99:
-                lines.append("R² below 0.99: check for an outlier or a standard outside the linear range.")
+                lines.append("RÂ² below 0.99: check for an outlier or a standard outside the linear range.")
             msg = "\n".join(lines)
         self.lbl_cal.configure(text=msg)
         for row in self.readings:
@@ -1031,7 +1033,7 @@ class App:
             ylab = f"Concentration ({unit})"
         note = ""
         if which == "Concentration" and not rows and self.readings:
-            note = ("Enter ε (or pick the calibration curve) under Sample to see concentrations."
+            note = ("Enter Îµ (or pick the calibration curve) under Sample to see concentrations."
                     if self.v_method.get() == "beer" else "Add calibration standards first.")
         if rows:
             t, tu = self._times(rows)
@@ -1100,11 +1102,11 @@ class App:
         if self.kin:
             k = self.kin
             names = {0: "Zero order  [R] vs t", 1: "First order  ln[R] vs t", 2: "Second order  1/[R] vs t"}
-            ylabs = {0: f"[R] ({k.unit})", 1: f"ln [R]", 2: f"1/[R] ({k.unit}⁻¹)"}
+            ylabs = {0: f"[R] ({k.unit})", 1: f"ln [R]", 2: f"1/[R] ({k.unit}â»Â¹)"}
             for o in (0, 1, 2):
                 f = k.fits[o]
                 self.tv_kin.insert("", "end", tags=("best",) if o == k.best else (), values=(
-                    names[o].split("  ")[0] + ("  ← best fit" if o == k.best else ""), fmt_sig(f.k),
+                    names[o].split("  ")[0] + ("  â† best fit" if o == k.best else ""), fmt_sig(f.k),
                     f.k_units, "-" if f.r2 is None else f"{f.r2:.5f}",
                     "-" if f.half_life_s is None else f"{fmt_sig(f.half_life_s)} s", fmt_sig(f.x0), f.used))
                 ax = self.kin_axes[o]
@@ -1113,20 +1115,20 @@ class App:
                 if f.fit is not None:
                     xs = np.array([tt.min(), tt.max()])
                     ax.plot(xs, f.fit.y(xs), "-", color="#dc2626", lw=1.5)
-                    ax.set_title(f"{names[o]}\nR² = {f.r2:.4f}", fontsize=9,
+                    ax.set_title(f"{names[o]}\nRÂ² = {f.r2:.4f}", fontsize=9,
                                  fontweight="bold" if o == k.best else "normal")
                 else:
                     ax.set_title(names[o], fontsize=9)
                 ax.set_xlabel("t (s)")
                 ax.set_ylabel(ylabs[o])
             rate = k.initial_rate
-            rate_txt = "" if rate is None else f"Initial rate ≈ {fmt_sig(rate)} {k.unit} s⁻¹   "
+            rate_txt = "" if rate is None else f"Initial rate â‰ˆ {fmt_sig(rate)} {k.unit} sâ»Â¹   "
             best = k.fits[k.best] if k.best is not None else None
             if best and best.k is not None:
                 rate_txt += f"Best straight line: order {k.best}, k = {fmt_sig(best.k)} {best.k_units}"
             self.lbl_kin_rate.configure(text=rate_txt)
             msg = (f"Tracking {k.basis}.  {len(rows)} readings, t = {rows[0]['t']:.0f}-{rows[-1]['t']:.0f} s.  "
-                   "R² values from different transforms are a guide, not proof of the order: "
+                   "RÂ² values from different transforms are a guide, not proof of the order: "
                    "also look for curvature in the plots.")
         else:
             self.lbl_kin_rate.configure(text="")
@@ -1146,11 +1148,11 @@ class App:
             if self.cal:
                 xs = np.linspace(min(0, c.min()), c.max() * 1.05, 50)
                 ax.plot(xs, self.cal.fit.y(xs), "-", color="#dc2626", lw=1.5,
-                        label=f"fit, R² = {self.cal.fit.r2:.4f}")
+                        label=f"fit, RÂ² = {self.cal.fit.r2:.4f}")
                 if self.last and self.last["A"] is not None:
                     ca = self.cal.conc(self.last["A"])
                     ax.plot([ca], [self.last["A"]], "*", ms=14, color="#ea580c",
-                            label=f"latest reading → {fmt_sig(ca)} {u}")
+                            label=f"latest reading â†’ {fmt_sig(ca)} {u}")
             ax.legend(loc="best", fontsize=8)
         ax.set_xlabel(f"Concentration ({u})")
         ax.set_ylabel("Absorbance (A)")
@@ -1169,9 +1171,9 @@ class App:
             lm = an.lambda_max(wl, a)
             if lm:
                 ax.axvline(lm[0], color="#dc2626", ls="--", lw=1)
-                ax.annotate(f"λmax ≈ {lm[0]:.0f} nm", (lm[0], lm[1]), textcoords="offset points",
+                ax.annotate(f"Î»max â‰ˆ {lm[0]:.0f} nm", (lm[0], lm[1]), textcoords="offset points",
                             xytext=(6, 6), fontsize=9, color="#dc2626")
-                self.lbl_spec.configure(text=f"λmax ≈ {lm[0]:.0f} nm  (A = {lm[1]:.3f})")
+                self.lbl_spec.configure(text=f"Î»max â‰ˆ {lm[0]:.0f} nm  (A = {lm[1]:.3f})")
         else:
             self.lbl_spec.configure(text="")
         ax.set_xlabel("Wavelength (nm)")
@@ -1221,7 +1223,7 @@ class App:
         if c is not None:
             self.sim.cuvette.conc_m = c * 1e-6
             self.sim.cuvette.react_t0 = None
-            self._raw(f"[simulator] cuvette now holds {c:g} µM dye", "dim")
+            self._raw(f"[simulator] cuvette now holds {c:g} ÂµM dye", "dim")
 
     def sim_start(self):
         if self.sim is None:
@@ -1230,7 +1232,7 @@ class App:
         if k:
             self.sim.cuvette.k = k
         self.sim.cuvette.react_t0 = time.monotonic()
-        self._raw(f"[simulator] reaction started, k = {self.sim.cuvette.k:g} s⁻¹", "dim")
+        self._raw(f"[simulator] reaction started, k = {self.sim.cuvette.k:g} sâ»Â¹", "dim")
 
     def sim_print(self):
         if self.sim is not None:
