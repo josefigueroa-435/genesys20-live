@@ -22,13 +22,84 @@ class TestDemoApp(unittest.TestCase):
         self.root = tk.Tk()
         self.root.withdraw()
         self.app = appmod.App(self.root, demo=True, settings_path=os.path.join(self.tmp.name, "s.json"),
-                              logs_dir=os.path.join(self.tmp.name, "logs"))
+                              logs_dir=os.path.join(self.tmp.name, "logs"),
+                              data_dir=os.path.join(self.tmp.name, "data"), check_updates=False)
+        # stub the name/notes prompts and file dialogs
+        self._sd = appmod.simpledialog.askstring
+        appmod.simpledialog.askstring = lambda title, prompt, **k: (
+            "" if "Notes" in prompt or "note" in prompt else "Test run")
 
     def tearDown(self):
         self.app.on_close()
         for n, f in self._saved.items():
             setattr(appmod.messagebox, n, f)
+        appmod.simpledialog.askstring = self._sd
         self.tmp.cleanup()
+
+    def test_presets_scan_runs(self):
+        a = self.app
+        # reference preset fills the sample
+        a.v_preset.set("Brilliant Blue FCF (FD&C Blue 1)")
+        a.apply_preset()
+        self.assertEqual(a.v_wl.get(), "630")
+        self.assertEqual(a.v_unit.get(), "mg/L")
+        self.assertAlmostEqual(float(a.v_eps.get()), 164.0 * 792.85, delta=1)
+        a.v_preset.set("Bradford protein assay (method)")
+        a.apply_preset()
+        self.assertEqual((a.v_eps.get(), a.v_method.get()), ("", "cal"))
+        # user preset round trip
+        a.v_wl.set("590")
+        a.v_eps.set("87000")
+        a.save_preset()
+        self.assertIn("Test run", a.user_presets.names())
+        # automatic scan on the simulator: blank pass, then sample pass after Continue
+        for k, v in (("start", "560"), ("stop", "620"), ("step", "20"), ("repeats", "2"), ("interval_min", "0"),
+                     ("settle_s", "0")):
+            a.v_sc[k].set(v)
+        a.v_sim_c.set("10")
+        a.sim_put_in()
+        a.sim.cuvette.conc_m = 0.0                       # the blank: no dye
+        a.start_scan()
+        end = time.time() + 20
+        while a._scan_wait != "hold" and time.time() < end:
+            self.spin(0.05)
+        self.assertEqual(a._scan_wait, "hold")           # waits for the cuvette swap
+        a.sim.cuvette.conc_m = 10e-6
+        a.scan_continue()
+        while a.scan.state != "done" and time.time() < end + 20:
+            self.spin(0.05)
+        self.assertEqual(a.scan.state, "done")
+        self.assertEqual(len(a.scan.samples()), 2)
+        wl, absb = a.scan.corrected(a.scan.samples()[0])
+        self.assertEqual(wl, [560, 580, 600, 620])
+        self.assertAlmostEqual(max(absb), 0.87, delta=0.03)        # peak 590 nm band, blank removed
+        a.nb.select(4)
+        self.spin(0.5)
+        self.assertEqual(len(a.tv_scan.get_children()), 2)
+        # save the run, list it, load it back
+        a.send("SND")
+        self.wait_for(1)
+        a.save_run()
+        rows = a._run_rows
+        self.assertEqual(len(rows), 1)
+        info = next(iter(rows.values()))
+        for f in ("run.json", "report.html", "readings.csv", "scan.csv", "scan.png"):
+            self.assertTrue(os.path.exists(os.path.join(info["folder"], f)), f)
+        n = len(a.readings)
+        a.readings.clear()
+        a.scan = None
+        a.load_run_data(appmod.runs.load_run(info["folder"]))
+        self.assertEqual(len(a.readings), n)
+        self.assertEqual(len(a.scan.samples()), 2)
+        # saved calibration curve round trip
+        a.s["standards"] = [[0, 0.004, 590], [5, 0.44, 590], [10, 0.874, 590]]
+        a._recalibrate()
+        a.save_curve()
+        a.s["standards"] = []
+        a.v_curve.set("Test run")
+        a.load_curve()
+        self.assertEqual(len(a.s["standards"]), 3)
+        self.assertIsNotNone(a.cal)
 
     def spin(self, seconds):
         end = time.time() + seconds

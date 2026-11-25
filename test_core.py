@@ -366,6 +366,22 @@ class TestSimulatorAndLink(unittest.TestCase):
                 self.link.send(bad)
         self.assertEqual(self.sim.received, [])
 
+    def test_configured_wavelength_command_only(self):
+        with self.assertRaises(ValueError):
+            self.link.wavelength_command(500)                     # nothing configured
+        for bad in ("WL", "WL {wl} {wl}", "WL {wl}\r\nZERO", "X" * 30 + "{wl}"):
+            with self.assertRaises(ValueError):
+                self.link.allow_wavelength_command(bad)
+        self.link.allow_wavelength_command("GOTO {wl}.0")
+        self.assertEqual(self.link.wavelength_command(512.4), "GOTO 512.0")
+        self.assertTrue(self.link._allowed("GOTO 512.0"))
+        for bad in ("GOTO 200.0", "GOTO 1200.0", "GOTO 512.0 X", "ZERO", "GOTO 5x2.0"):
+            self.assertFalse(self.link._allowed(bad), bad)
+        with self.assertRaises(ValueError):
+            self.link.wavelength_command(300)
+        self.link.allow_wavelength_command(None)
+        self.assertFalse(self.link._allowed("GOTO 512.0"))
+
     def test_polling(self):
         self.link.poll_interval = 0.1
         evs = self.collect(["line"], timeout=3)

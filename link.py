@@ -26,6 +26,7 @@ t is time.time().
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import time
 from collections import deque
@@ -64,6 +65,8 @@ class Link:
         self._lock = threading.Lock()     # guards writes and _pending
         self._pending: deque = deque()    # the query in flight (at most one)
         self._outbox: deque = deque()     # queries waiting their turn
+        self._wl_re = None                # set-wavelength command shape, only if the user configured one
+        self._wl_parts = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._next_poll = 0.0
@@ -98,10 +101,40 @@ class Link:
                 pass
             self.events.put(("closed", time.time()))
 
+    def allow_wavelength_command(self, template: str | None) -> None:
+        """Permit exactly one extra command shape: a set-wavelength command typed in by the user from
+        Thermo's RS232 command set, e.g. "XYZ {wl}". Only whole-number wavelengths 325-1100 can be
+        substituted; anything else is still refused. None switches it off."""
+        self._wl_re = None
+        self._wl_parts = None
+        if not template:
+            return
+        if template.count("{wl}") != 1 or len(template) > 24 or not all(32 <= ord(c) < 127 for c in template):
+            raise ValueError("the command must be plain text with {wl} exactly once (max 24 characters)")
+        pre, post = template.split("{wl}")
+        self._wl_parts = (pre, post)
+        self._wl_re = re.compile(re.escape(pre) + r"(\d{3,4})" + re.escape(post))
+
+    def wavelength_command(self, wl: float) -> str:
+        if not getattr(self, "_wl_parts", None):
+            raise ValueError("no set-wavelength command has been configured")
+        wl = int(round(wl))
+        if not 325 <= wl <= 1100:
+            raise ValueError("wavelength outside 325-1100 nm")
+        pre, post = self._wl_parts
+        return f"{pre}{wl}{post}"
+
+    def _allowed(self, cmd: str) -> bool:
+        if cmd in READ_ONLY_COMMANDS:
+            return True
+        rx = getattr(self, "_wl_re", None)
+        m = rx.fullmatch(cmd) if rx else None
+        return bool(m) and 325 <= int(m.group(1)) <= 1100
+
     def send(self, cmd: str) -> None:
-        """Queue one of the read-only queries; anything else is refused. The worker thread writes it
-        as soon as no other query is in flight."""
-        if cmd not in READ_ONLY_COMMANDS:
+        """Queue a read-only query (or the configured set-wavelength command); anything else is
+        refused. The worker thread writes it as soon as no other query is in flight."""
+        if not self._allowed(cmd):
             raise ValueError(f"{cmd!r} is not one of the read-only queries {READ_ONLY_COMMANDS}")
         if self._port is None:
             raise RuntimeError("not connected")

@@ -49,6 +49,63 @@ set its wavelength, so type the wavelength you set into the Sample box.
 - **Spectrum**: step the wavelength by hand (re-blank at each), type it in, and add the reading.
   λmax is refined with a parabola through the top three points.
 
+## Presets and saved calibration curves
+
+The preset list at the top of the Sample card fills in wavelength, ε and molar mass:
+
+- **Your presets** (★) are saved with **Save...** into the data folder.
+- **Reference presets** are published values, each with its source shown under the list:
+  - NADH 340 nm, 6,220.
+  - p-nitrophenolate 405 nm, 18,300.
+  - Ferroin 508 nm, 11,100.
+  - Crystal violet 590 nm, 87,000. Literature disagrees on this one, so calibrate it.
+  - Six FD&C food dyes, using the official JECFA/FDA absorptivities. mg/L comes straight from the
+    published number.
+- **Method presets** (Bradford 595 nm, BCA 562 nm, permanganate 525 nm) only set the wavelength and
+  switch to "My calibration curve": those methods need standards.
+- The Calibration tab saves and reloads named curves ("Saved curves").
+
+## Wavelength scans (Scan tab)
+
+Set the range, step and number of scans (for example 3 scans every 5 min to watch a spectrum change).
+
+- **Blank pass first** reads the blank at every wavelength and subtracts it from each scan
+  (single-beam correction). The app pauses for you to swap in the sample.
+- **Guided** (the real GENESYS today):
+  - The big prompt says which wavelength to set.
+  - Set it with the nm keys and press **Print** (Printer setup = Serial, Print WL = Yes).
+  - The printed wavelength is checked against the target.
+  - **Read now (SND)** works too.
+- **Automatic** needs the set-wavelength command from Thermo's GENESYS 20 RS232 command set
+  (ask Thermo technical support). Enter it under **Set-wavelength command...**. It is never guessed,
+  because the same port accepts calibration-table uploads. The demo's simulator scans automatically.
+- Results: blank-corrected overlay (older scans lighter), λmax per scan, **Export CSV**.
+
+## Saving and sharing runs (Runs tab)
+
+- **Save run...** stores a folder in `<data folder>/runs` with:
+  - `report.html`: one page with every chart, to email or print.
+  - `readings.csv` and `scan.csv`.
+  - The chart images.
+  - `run.json`.
+- **Runs** tab:
+  - **Load into app** reopens a run.
+  - **Share (zip)** packs it.
+  - **Copy summary** puts a text summary on the clipboard.
+  - **Delete** moves it to `runs/_deleted`.
+- Point the data folder at a OneDrive or shared folder (**Change...**) and everyone sees the same runs,
+  presets and curves.
+
+## Updates
+
+Installed copies check GitHub at start-up. When a newer release exists, a bar offers **Update now**:
+- Only changed files are downloaded, each one checked against its SHA-256.
+- The old files go to `.update_backup`.
+- Settings, logs and the data folder are never touched.
+
+Click the version in the header to check by hand. The development copy (the folder with `.git`) never
+updates itself; `py tools/publish.py X.Y.Z "notes"` publishes a release from it.
+
 ## Troubleshooting the cable (tools folder)
 
 Run these with the app disconnected (they need the port). Replace COM12 with your port.

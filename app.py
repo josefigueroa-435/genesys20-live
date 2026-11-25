@@ -11,13 +11,17 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
+import math
 import os
 import queue
 import re
 import sys
 import threading
 import time
+import webbrowser
+from dataclasses import asdict
 from datetime import datetime
 
 import tkinter as tk
@@ -82,11 +86,20 @@ MARK = dict(ms=6.5, mec=UI["surface"], mew=1.5)
 
 import analysis as an  # noqa: E402
 import genesys as g  # noqa: E402
+import presets  # noqa: E402
+import runs  # noqa: E402
+import updater  # noqa: E402
 from link import Link  # noqa: E402
+from scan import ScanConfig, ScanEngine  # noqa: E402
+from version import __version__ as VERSION  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP_NAME = "GENESYS 20 Live"
-VERSION = "0.3.0"
+# sequential blue ramp (dataviz reference, steps 250 -> 700) for repeated scans: older = lighter
+SCAN_RAMP = ["#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95",
+             "#104281", "#0d366b"]
+SCAN_MODES = {"guided": "Guided: you set λ, press Print", "sim": "Simulator: fully automatic",
+              "command": "Automatic: serial set-λ command"}
 
 DEFAULTS = {
     "serial": g.SerialSettings().to_dict(),
@@ -113,6 +126,11 @@ DEFAULTS = {
     "kin_from": "",
     "kin_to": "",
     "geometry": "zoomed",
+    "data_dir": "",          # runs, saved presets and calibration curves; a OneDrive folder shares them
+    "preset": "",
+    "scan": {"start": 400, "stop": 700, "step": 10, "blank_first": True, "repeats": 1, "interval_min": 0,
+             "settle_s": 3, "mode": "guided"},
+    "wl_command": "",        # set-wavelength command template from Thermo's RS232 command set ("" = off)
 }
 
 DEMO_SAMPLE = {"wl": "590", "eps": "87000", "unit": "µM", "species": "reactant", "a_inf": "0.004",
@@ -207,7 +225,8 @@ class ScrollFrame(ttk.Frame):
 
 class App:
     def __init__(self, root: tk.Tk, demo: bool = False, settings_path: str | None = None,
-                 logs_dir: str | None = None, auto_connect: bool = True):
+                 logs_dir: str | None = None, auto_connect: bool = True, data_dir: str | None = None,
+                 check_updates: bool | None = None):
         self.root = root
         self.demo = demo
         default_settings = os.path.join(HERE, "settings.demo.json" if demo else "settings.json")
@@ -217,7 +236,21 @@ class App:
             for k, v in DEMO_SAMPLE.items():
                 if not self.s.get(k):
                     self.s[k] = v
+            self.s["scan"] = dict(self.s["scan"], mode="sim")
         self.logs = logs_dir or os.path.join(HERE, "logs")
+        self.data_dir = data_dir or self.s.get("data_dir") or os.path.join(HERE, "data")
+        self.user_presets = presets.Store(os.path.join(self.data_dir, "presets.json"))
+        self.curves = presets.Store(os.path.join(self.data_dir, "calibrations.json"))
+        self.scan: ScanEngine | None = None
+        self._scan_wait: str | None = None       # None | "settle" | "read" | "hold"
+        self._scan_due = 0.0
+        self._scan_set_wl: float | None = None
+        self._scan_poll_restore = False
+        self._scan_passes_seen = 0
+        self._viewing: str | None = None          # name of a saved run loaded for viewing
+        self._ui_calls: queue.SimpleQueue = queue.SimpleQueue()
+        self._update_manifest: dict | None = None
+        self._updating = False
         self.link = Link()
         self.sim: g.SimulatedGenesys | None = None
         self.log: g.SessionLog | None = None
@@ -256,6 +289,8 @@ class App:
         root.after(100, self._pump)
         if demo and auto_connect:
             self.connect()
+        if (not demo) if check_updates is None else check_updates:
+            root.after(3000, self.check_updates)
 
     # ================================================================== layout
     def _style(self):
@@ -345,8 +380,10 @@ class App:
         self._build_kin_tab()
         self._build_cal_tab()
         self._build_spec_tab()
+        self._build_scan_tab()
+        self._build_runs_tab()
         self._build_raw_tab()
-        self.nb.bind("<<NotebookTabChanged>>", lambda e: self._dirty.update({"live", "kin", "cal", "spec"}))
+        self.nb.bind("<<NotebookTabChanged>>", lambda e: self._dirty.update({"live", "kin", "cal", "spec", "scan"}))
 
     def _build_header(self, r):
         bar = tk.Frame(r, bg=UI["header"], height=52)
@@ -354,10 +391,23 @@ class App:
         bar.pack_propagate(False)
         tk.Label(bar, text="GENESYS 20 Live", bg=UI["header"], fg=UI["header_ink"],
                  font=(FONT, 14, "bold")).pack(side="left", padx=(16, 8))
-        tk.Label(bar, text=f"v{VERSION}  ·  Thermo Scientific GENESYS 20", bg=UI["header"],
-                 fg=UI["header_muted"], font=(FONT, 9)).pack(side="left", pady=(4, 0))
+        self.lbl_version = tk.Label(bar, text=f"v{VERSION}  ·  Thermo Scientific GENESYS 20", bg=UI["header"],
+                                    fg=UI["header_muted"], font=(FONT, 9), cursor="hand2")
+        self.lbl_version.pack(side="left", pady=(4, 0))
+        self.lbl_version.bind("<Button-1>", lambda _e: self.check_updates(manual=True))
         self.lbl_status = tk.Label(bar, text="", font=(FONT, 9, "bold"), padx=12, pady=4)
         self.lbl_status.pack(side="right", padx=16)
+        # update bar (shown only when a newer release exists)
+        self.update_bar = tk.Frame(r, bg=UI["accent_soft"])
+        self.lbl_update = tk.Label(self.update_bar, text="", bg=UI["accent_soft"], fg=UI["ink"], font=(FONT, 10),
+                                   anchor="w")
+        self.lbl_update.pack(side="left", fill="x", expand=True, padx=16, pady=6)
+        self.btn_update_later = ttk.Button(self.update_bar, text="Later", command=self.update_bar.pack_forget)
+        self.btn_update_later.pack(side="right", padx=(4, 16), pady=4)
+        self.btn_update = ttk.Button(self.update_bar, text="Update now", style="Accent.TButton",
+                                     command=self.install_update)
+        self.btn_update.pack(side="right", pady=4)
+        self._header = bar
 
     def _card(self, parent, title, right=None):
         """A white card with a hairline border on the page background. Returns the inner frame."""
@@ -488,10 +538,11 @@ class App:
         ttk.Button(row, text="New run (t = 0 now)", command=self.new_run).pack(side="left")
         ttk.Button(row, text="Mark event...", command=self.mark_event).pack(side="left", padx=4)
         row = ttk.Frame(f)
-        row.pack(fill="x", pady=(4, 0))
-        ttk.Button(row, text="Save CSV...", command=self.save_csv).pack(side="left")
-        self.lbl_run = ttk.Label(row, text="", style="Hint.TLabel")
-        self.lbl_run.pack(side="left", padx=6)
+        row.pack(fill="x", pady=(6, 0))
+        ttk.Button(row, text="Save run...", style="Accent.TButton", command=self.save_run).pack(side="left")
+        ttk.Button(row, text="Save CSV...", command=self.save_csv).pack(side="left", padx=4)
+        self.lbl_run = ttk.Label(f, text="", style="Hint.TLabel")
+        self.lbl_run.pack(anchor="w", pady=(4, 0))
 
         # --- sample
         f = self._section(p, "Sample - what you know")
@@ -504,6 +555,19 @@ class App:
         self.v_c0 = tk.StringVar(value=self.s["c0"])
         self.v_ainf = tk.StringVar(value=self.s["a_inf"])
         self.v_method = tk.StringVar(value=self.s["conc_method"])
+        # presets: your saved ones first, then published reference values
+        self.v_preset = tk.StringVar(value=self.s.get("preset", ""))
+        row = ttk.Frame(f)
+        row.pack(fill="x")
+        self.cb_preset = ttk.Combobox(row, textvariable=self.v_preset, state="readonly",
+                                      postcommand=self._fill_presets)
+        self.cb_preset.pack(side="left", fill="x", expand=True)
+        self.cb_preset.bind("<<ComboboxSelected>>", lambda e: self.apply_preset())
+        ttk.Button(row, text="Save...", width=7, command=self.save_preset).pack(side="left", padx=(4, 0))
+        self.lbl_preset = ttk.Label(f, text="Pick a preset to fill in λ and ε, or type your own below.",
+                                    style="Hint.TLabel", wraplength=290)
+        self.lbl_preset.pack(anchor="w", pady=(3, 8))
+        self._fill_presets()
         grid = ttk.Frame(f)
         grid.pack(fill="x")
         rows = [
@@ -664,6 +728,19 @@ class App:
         ttk.Label(left, text="Blank the GENESYS first (0 ABS/100%T), then put in each standard and add "
                              "its reading. Tick 'My calibration curve' under Sample to turn readings into "
                              "concentrations with this line.", style="Hint.TLabel", wraplength=320).pack(fill="x")
+        tk.Frame(left, bg=UI["border"], height=1).pack(fill="x", pady=(12, 8))
+        ttk.Label(left, text="Saved curves", style="Head.TLabel").pack(anchor="w")
+        self.v_curve = tk.StringVar()
+        self.cb_curve = ttk.Combobox(left, textvariable=self.v_curve, state="readonly",
+                                     postcommand=lambda: self.cb_curve.configure(values=self.curves.names()))
+        self.cb_curve.pack(fill="x", pady=(4, 4))
+        row = ttk.Frame(left)
+        row.pack(fill="x")
+        ttk.Button(row, text="Load", command=self.load_curve).pack(side="left")
+        ttk.Button(row, text="Save current...", command=self.save_curve).pack(side="left", padx=4)
+        ttk.Button(row, text="Delete", command=self.delete_curve).pack(side="left")
+        ttk.Label(left, text="Saved in the data folder, so a shared (OneDrive) folder shares them too.",
+                  style="Hint.TLabel", wraplength=320).pack(fill="x", pady=(4, 0))
         holder = ttk.Frame(tab)
         holder.pack(side="left", fill="both", expand=True)
         self.cal_fig, self.cal_ax, self.cal_canvas = self._figure(holder)
@@ -698,6 +775,110 @@ class App:
         holder.pack(side="left", fill="both", expand=True)
         self.spec_fig, self.spec_ax, self.spec_canvas = self._figure(holder)
         self._watermark(self.spec_fig)
+
+    def _build_scan_tab(self):
+        tab = ttk.Frame(self.nb, padding=(14, 12, 14, 8))
+        self.nb.add(tab, text="Scan")
+        left = ttk.Frame(tab, width=340)
+        left.pack(side="left", fill="y", padx=(0, 10))
+        sc = {**DEFAULTS["scan"], **(self.s.get("scan") or {})}
+        self.v_sc = {k: tk.StringVar(value=str(sc[k])) for k in ("start", "stop", "step", "repeats",
+                                                                  "interval_min", "settle_s")}
+        self.v_sc_blank = tk.BooleanVar(value=bool(sc["blank_first"]))
+        grid = ttk.Frame(left)
+        grid.pack(fill="x")
+        for i, (key, lab) in enumerate((("start", "From (nm)"), ("stop", "To (nm)"), ("step", "Step (nm)"))):
+            ttk.Label(grid, text=lab, style="Hint.TLabel").grid(row=0, column=i, sticky="w", padx=(0, 6))
+            ttk.Entry(grid, textvariable=self.v_sc[key], width=8).grid(row=1, column=i, sticky="we", padx=(0, 6))
+        for i, (key, lab) in enumerate((("repeats", "Scans"), ("interval_min", "Every (min)"),
+                                        ("settle_s", "Settle (s)"))):
+            ttk.Label(grid, text=lab, style="Hint.TLabel").grid(row=2, column=i, sticky="w", padx=(0, 6), pady=(6, 0))
+            ttk.Entry(grid, textvariable=self.v_sc[key], width=8).grid(row=3, column=i, sticky="we", padx=(0, 6))
+        ttk.Checkbutton(left, text="Blank pass first (single-beam correction)",
+                        variable=self.v_sc_blank).pack(anchor="w", pady=(8, 2))
+        ttk.Label(left, text="How the wavelength is set", style="Head.TLabel").pack(anchor="w", pady=(6, 2))
+        modes = ["guided", "sim"] if self.demo else ["guided", "command"]
+        self.v_sc_mode = tk.StringVar(value=SCAN_MODES[sc["mode"] if sc["mode"] in modes else "guided"])
+        self.cb_sc_mode = ttk.Combobox(left, textvariable=self.v_sc_mode, state="readonly",
+                                       values=[SCAN_MODES[m] for m in modes])
+        self.cb_sc_mode.pack(fill="x")
+        if not self.demo:
+            ttk.Button(left, text="Set-wavelength command...", style="Link.TButton",
+                       command=self.configure_wl_command).pack(anchor="w", pady=(2, 0))
+        row = ttk.Frame(left)
+        row.pack(fill="x", pady=(10, 0))
+        self.btn_scan = ttk.Button(row, text="Start scan", style="Accent.TButton", command=self.start_scan)
+        self.btn_scan.pack(side="left")
+        ttk.Button(row, text="Stop", command=self.stop_scan).pack(side="left", padx=4)
+        ttk.Button(row, text="Export CSV...", command=self.export_scan).pack(side="left")
+        # the prompt: what to do next (big, because you're looking at the instrument)
+        box = tk.Frame(left, bg=UI["border"], padx=1, pady=1)
+        box.pack(fill="x", pady=(10, 0))
+        inner = tk.Frame(box, bg=UI["accent_soft"], padx=12, pady=10)
+        inner.pack(fill="x")
+        self.lbl_scan_prompt = tk.Label(inner, text="Set the range, then Start scan.", bg=UI["accent_soft"],
+                                        fg=UI["ink"], font=(FONT, 13, "bold"), wraplength=300, justify="left")
+        self.lbl_scan_prompt.pack(anchor="w")
+        self.lbl_scan_progress = tk.Label(inner, text="", bg=UI["accent_soft"], fg=UI["ink2"], font=(FONT, 9),
+                                          wraplength=300, justify="left")
+        self.lbl_scan_progress.pack(anchor="w", pady=(4, 0))
+        row = ttk.Frame(left)
+        row.pack(fill="x", pady=(8, 0))
+        self.btn_scan_go = ttk.Button(row, text="Continue", command=self.scan_continue)
+        self.btn_scan_go.pack(side="left")
+        ttk.Button(row, text="Read now (SND)", command=self.scan_read_now).pack(side="left", padx=4)
+        ttk.Button(row, text="Skip point", command=self.scan_skip).pack(side="left")
+        self.tv_scan = ttk.Treeview(left, columns=("scan", "t", "lmax", "amax"), show="headings", height=5)
+        for c, t, w in (("scan", "Scan", 70), ("t", "Start (min)", 80), ("lmax", "λmax (nm)", 80),
+                        ("amax", "A at λmax", 80)):
+            self.tv_scan.heading(c, text=t)
+            self.tv_scan.column(c, width=w, anchor="center")
+        self.tv_scan.pack(fill="x", pady=(10, 0))
+        ttk.Label(left, text="Guided: after each prompt, set that wavelength with the nm keys and press Print "
+                             "(Print WL = Yes); the printed λ is checked. The GENESYS 20 has no public "
+                             "set-wavelength command yet, so it can't move by itself.",
+                  style="Hint.TLabel", wraplength=320).pack(fill="x", pady=(8, 0))
+        holder = ttk.Frame(tab)
+        holder.pack(side="left", fill="both", expand=True)
+        self.scan_fig, self.scan_ax, self.scan_canvas = self._figure(holder)
+        self._watermark(self.scan_fig)
+
+    def _build_runs_tab(self):
+        tab = ttk.Frame(self.nb, padding=(14, 12, 14, 8))
+        self.nb.add(tab, text="Runs")
+        row = ttk.Frame(tab)
+        row.pack(fill="x")
+        ttk.Label(row, text="Data folder", style="Head.TLabel").pack(side="left")
+        self.lbl_data_dir = ttk.Label(row, text=self.data_dir, style="Sub.TLabel")
+        self.lbl_data_dir.pack(side="left", padx=8)
+        ttk.Button(row, text="Change...", command=self.choose_data_dir).pack(side="right")
+        ttk.Button(row, text="Open", command=lambda: self._open_path(self.data_dir)).pack(side="right", padx=4)
+        ttk.Label(tab, text="Runs, saved presets and calibration curves live here. Pick a OneDrive or shared "
+                            "folder and everyone using it sees the same library.",
+                  style="Hint.TLabel").pack(anchor="w", pady=(2, 8))
+        row = ttk.Frame(tab)
+        row.pack(fill="x", pady=(0, 8))
+        ttk.Button(row, text="Save current run...", style="Accent.TButton", command=self.save_run).pack(side="left")
+        for text, cmd in (("Open report", self.run_open_report), ("Open folder", self.run_open_folder),
+                          ("Share (zip)...", self.run_share), ("Copy summary", self.run_copy_summary),
+                          ("Load into app", self.run_load), ("Delete", self.run_delete),
+                          ("Refresh", self.refresh_runs)):
+            ttk.Button(row, text=text, command=cmd).pack(side="left", padx=(6, 0))
+        frame = tk.Frame(tab, bg=UI["border"], padx=1, pady=1)
+        frame.pack(fill="both", expand=True)
+        cols = ("saved", "name", "readings", "wl", "notes")
+        self.tv_runs = ttk.Treeview(frame, columns=cols, show="headings")
+        for c, t, w in (("saved", "Saved", 140), ("name", "Name", 240), ("readings", "Readings", 80),
+                        ("wl", "λ (nm)", 70), ("notes", "Notes", 380)):
+            self.tv_runs.heading(c, text=t)
+            self.tv_runs.column(c, width=w, anchor="w" if c in ("name", "notes") else "center")
+        self.tv_runs.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(frame, command=self.tv_runs.yview)
+        self.tv_runs.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.tv_runs.bind("<Double-1>", lambda e: self.run_open_report())
+        self._run_rows: dict[str, dict] = {}
+        self.refresh_runs()
 
     def _build_raw_tab(self):
         tab = ttk.Frame(self.nb, padding=(14, 12, 14, 8))
@@ -893,6 +1074,13 @@ class App:
                 break
         if ports is not None:
             self.refresh_ports(ports)
+        while True:                                   # results from background threads (updates)
+            try:
+                fn = self._ui_calls.get_nowait()
+            except queue.Empty:
+                break
+            fn()
+        self._scan_step()
         now = time.time()
         if self.t0 is not None:
             el = int(now - self.t0)
@@ -900,7 +1088,7 @@ class App:
         if self._dirty and now - self._last_draw > 0.35:
             self._redraw()
             self._last_draw = now
-        self.root.after(100, self._pump)
+        self._pump_id = self.root.after(100, self._pump)
 
     def _handle(self, ev):
         kind = ev[0]
@@ -949,6 +1137,13 @@ class App:
         if r is None:
             self._raw(f"<- {text}" + ("   (SND reply, not understood)" if cmd else ""), "in", t)
             return
+        if self._scan_take(r, "SND" if cmd == "SND" else "Print"):    # a running scan gets first claim
+            return
+        if self._viewing:                             # new live data: stop calling it the saved run
+            self._viewing = None
+            self.readings.clear()
+            self.marks.clear()
+            self.t0 = None
         if self.t0 is None:
             self.t0 = t
         wl_set = self._num(self.v_wl)
@@ -1239,15 +1434,626 @@ class App:
             messagebox.showinfo(APP_NAME, f"Wavelength box set to {round(lm[0])} nm. Set the same wavelength "
                                           "on the GENESYS and blank it again.")
 
+    # ================================================================== presets
+    def _fill_presets(self):
+        mine = [f"★ {n}" for n in self.user_presets.names()]
+        ref = [p["name"] for p in presets.REFERENCE]
+        self.cb_preset.configure(values=mine + ref)
+
+    def apply_preset(self):
+        name = self.v_preset.get()
+        if name.startswith("★ "):
+            p = self.user_presets.get(name[2:])
+            if not p:
+                return
+            for k, var in (("wl", self.v_wl), ("path", self.v_path), ("eps", self.v_eps), ("mw", self.v_mw),
+                           ("unit", self.v_unit), ("species", self.v_species), ("c0", self.v_c0),
+                           ("a_inf", self.v_ainf), ("conc_method", self.v_method)):
+                if p.get(k) not in (None, ""):
+                    var.set(p[k])
+            self.lbl_preset.configure(text=f"Your preset (saved {p.get('saved', '')[:10]}). {p.get('note', '')}")
+        else:
+            p = next((x for x in presets.REFERENCE if x["name"] == name), None)
+            if not p:
+                return
+            self.v_wl.set(str(p["wl"]))
+            eps = presets.eps_of(p)
+            self.v_eps.set("" if eps is None else f"{eps:.0f}")
+            self.v_mw.set(str(p.get("mw", "")))
+            self.v_unit.set(p.get("unit", "µM"))
+            self.v_method.set("cal" if p.get("method") else "beer")
+            self.lbl_preset.configure(text=presets.describe(p) + f"  Source: {p['source']}")
+        self.s["preset"] = name
+        if self.sim is None and self.link.is_open:
+            self._raw(f"Preset {name}: set the GENESYS to {self.v_wl.get()} nm and blank it.", "info")
+
+    def save_preset(self):
+        name = simpledialog.askstring(APP_NAME, "Name for this preset (saved in the data folder):",
+                                      parent=self.root)
+        if not name:
+            return
+        note = simpledialog.askstring(APP_NAME, "Optional note (conditions, source):", parent=self.root) or ""
+        self.user_presets.put({"name": name.strip(), "wl": self.v_wl.get(), "path": self.v_path.get(),
+                               "eps": self.v_eps.get(), "mw": self.v_mw.get(), "unit": self.v_unit.get(),
+                               "species": self.v_species.get(), "c0": self.v_c0.get(),
+                               "a_inf": self.v_ainf.get(), "conc_method": self.v_method.get(), "note": note})
+        self._fill_presets()
+        self.v_preset.set(f"★ {name.strip()}")
+        self.statusbar.configure(text=f"Saved preset '{name.strip()}' to {self.user_presets.path}")
+
+    # ================================================================== saved calibration curves
+    def save_curve(self):
+        if len(self.s.get("standards", [])) < 2:
+            messagebox.showinfo(APP_NAME, "Add at least two standards first.")
+            return
+        name = simpledialog.askstring(APP_NAME, "Name for this calibration curve:", parent=self.root,
+                                      initialvalue=f"{self.v_preset.get().lstrip('★ ') or 'Curve'} "
+                                                   f"{datetime.now():%Y-%m-%d}")
+        if not name:
+            return
+        fit = self.cal.fit if self.cal else None
+        self.curves.put({"name": name.strip(), "unit": self.v_cal_unit.get(), "wl": self.v_wl.get(),
+                         "path": self.v_path.get(), "standards": self.s["standards"],
+                         "fit": None if fit is None else {"slope": fit.slope, "intercept": fit.intercept,
+                                                          "r2": fit.r2, "n": fit.n}})
+        self.v_curve.set(name.strip())
+        self.statusbar.configure(text=f"Saved calibration curve '{name.strip()}' to {self.curves.path}")
+
+    def load_curve(self):
+        c = self.curves.get(self.v_curve.get())
+        if not c:
+            messagebox.showinfo(APP_NAME, "Pick a saved curve first.")
+            return
+        if self.s.get("standards") and not messagebox.askyesno(APP_NAME, "Replace the current standards?"):
+            return
+        self.s["standards"] = [list(x) for x in c.get("standards", [])]
+        self.tv_cal.delete(*self.tv_cal.get_children())
+        self.v_cal_unit.set(c.get("unit", self.v_cal_unit.get()))
+        for cc, a, wl in self.s["standards"]:
+            self.tv_cal.insert("", "end", values=(fmt_sig(cc), f"{a:.4f}", "" if wl is None else f"{wl:g}"))
+        self._recalibrate()
+        if c.get("wl") and c["wl"] != self.v_wl.get():
+            messagebox.showinfo(APP_NAME, f"This curve was made at {c['wl']} nm. Set the GENESYS (and the "
+                                          "wavelength box) to the same wavelength before using it.")
+
+    def delete_curve(self):
+        name = self.v_curve.get()
+        if name and messagebox.askyesno(APP_NAME, f"Delete the saved curve '{name}'?"):
+            self.curves.delete(name)
+            self.v_curve.set("")
+
+    # ================================================================== wavelength scans
+    def _scan_mode(self) -> str:
+        label = self.v_sc_mode.get()
+        return next((k for k, v in SCAN_MODES.items() if v == label), "guided")
+
+    def _scan_config(self) -> ScanConfig:
+        f = {k: float(str(v.get()).replace(",", ".")) for k, v in self.v_sc.items()}
+        return ScanConfig(start=f["start"], stop=f["stop"], step=f["step"], blank_first=self.v_sc_blank.get(),
+                          repeats=max(1, int(f["repeats"])), interval_s=max(0.0, f["interval_min"]) * 60,
+                          settle_s=max(0.0, f["settle_s"]))
+
+    def configure_wl_command(self):
+        cur = self.s.get("wl_command", "")
+        text = simpledialog.askstring(
+            APP_NAME,
+            "Set-wavelength command from Thermo's GENESYS 20 RS232 command set, with {wl} where the "
+            "wavelength goes (example shape only: CMD {wl}).\n\nOnly enter a command from Thermo's "
+            "documentation: this port also accepts calibration-table uploads, so a guessed command could "
+            "change the instrument. Leave empty to switch automatic scans off.",
+            initialvalue=cur, parent=self.root)
+        if text is None:
+            return
+        text = text.strip()
+        try:
+            self.link.allow_wavelength_command(text or None)
+        except ValueError as exc:
+            messagebox.showerror(APP_NAME, str(exc))
+            return
+        self.s["wl_command"] = text
+        self.save_settings()
+        messagebox.showinfo(APP_NAME, "Automatic scans are " + ("on: pick 'Automatic' as the mode." if text
+                                                                else "off."))
+
+    def start_scan(self):
+        if self.scan and self.scan.state in ("running", "waiting"):
+            return
+        try:
+            cfg = self._scan_config()
+            cfg.wavelengths()
+        except ValueError as exc:
+            messagebox.showerror(APP_NAME, f"Check the scan settings: {exc}")
+            return
+        mode = self._scan_mode()
+        if not self.link.is_open:
+            messagebox.showinfo(APP_NAME, "Connect first.")
+            return
+        if mode == "command":
+            if not self.s.get("wl_command"):
+                messagebox.showinfo(APP_NAME, "Automatic scans need the set-wavelength command from Thermo's "
+                                              "RS232 command set first (Set-wavelength command...). Use Guided.")
+                return
+            self.link.allow_wavelength_command(self.s["wl_command"])
+        self.s["scan"] = {"start": cfg.start, "stop": cfg.stop, "step": cfg.step, "blank_first": cfg.blank_first,
+                          "repeats": cfg.repeats, "interval_min": cfg.interval_s / 60, "settle_s": cfg.settle_s,
+                          "mode": mode}
+        self._scan_poll_restore = self.v_poll.get()
+        if self._scan_poll_restore:               # hands-free polling would steal the scan's readings
+            self.v_poll.set(False)
+            self.link.poll_interval = 0
+        self.scan = ScanEngine(cfg)
+        self.scan.start()
+        self._scan_passes_seen = len(self.scan.passes)
+        self._scan_wait = None
+        self._scan_set_wl = None
+        self.btn_scan.state(["disabled"])
+        first = "BLANK" if cfg.blank_first else "SAMPLE"
+        self._raw(f"Scan started: {cfg.start:g}-{cfg.stop:g} nm every {cfg.step:g} nm, {cfg.repeats} scan(s), "
+                  f"{SCAN_MODES[mode]}. {first} in first.", "info")
+        self._dirty.add("scan")
+
+    def stop_scan(self):
+        if self.scan:
+            self.scan.stop()
+            self._scan_finished("Scan stopped.")
+
+    def _scan_finished(self, text: str):
+        self._scan_wait = None
+        self.btn_scan.state(["!disabled"])
+        if self._scan_poll_restore:
+            self._scan_poll_restore = False
+            self.v_poll.set(True)
+            self.on_poll_toggle()
+        self.lbl_scan_prompt.configure(text=text)
+        self._dirty.add("scan")
+
+    def scan_continue(self):
+        if self._scan_wait == "hold":
+            self._scan_wait = None
+
+    def scan_skip(self):
+        if self.scan and self.scan.state == "running":
+            self.scan.skip()
+            self._scan_wait = None
+            self._dirty.add("scan")
+
+    def scan_read_now(self):
+        if self.scan and self.scan.state == "running" and self._scan_wait in (None, "settle"):
+            self.send("SND")
+            self._scan_wait = "read"
+            self._scan_due = time.time() + 6
+
+    def _scan_step(self):
+        """Called every 100 ms while a scan exists: advance timers and keep the prompt current."""
+        sc = self.scan
+        if sc is None or sc.state in ("idle", "done", "stopped"):
+            return
+        sc.tick()
+        if len(sc.passes) != self._scan_passes_seen:           # a new pass began
+            self._scan_passes_seen = len(sc.passes)
+            prev = sc.passes[-2] if len(sc.passes) > 1 else None
+            if prev is not None and prev.kind == "blank":
+                self._scan_wait = "hold"                        # swap the cuvette before the sample pass
+            self._scan_set_wl = None
+            self._dirty.add("scan")
+        mode = self._scan_mode()
+        tgt = sc.target()
+        self.lbl_scan_progress.configure(text=sc.progress())
+        if tgt is None:
+            self.lbl_scan_prompt.configure(text=f"Waiting: {sc.progress()}")
+            return
+        what = "BLANK" if sc.current.kind == "blank" else "SAMPLE"
+        if self._scan_wait == "hold":
+            self.lbl_scan_prompt.configure(text="Blank pass done. Put the SAMPLE in, then click Continue.")
+            return
+        if mode == "guided":
+            if self._scan_wait != "read":
+                self.lbl_scan_prompt.configure(text=f"{what} in · set the GENESYS to {tgt:g} nm, then press Print")
+            elif time.time() > self._scan_due:
+                self._scan_wait = None
+            return
+        # automatic: simulator or the configured command
+        now = time.time()
+        if self._scan_wait is None and self._scan_set_wl != tgt:
+            try:
+                if mode == "sim" and self.sim is not None:
+                    self.sim.wl = tgt
+                else:
+                    self.link.send(self.link.wavelength_command(tgt))
+            except Exception as exc:
+                self.stop_scan()
+                messagebox.showerror(APP_NAME, f"Could not set the wavelength: {exc}")
+                return
+            self._scan_set_wl = tgt
+            self._scan_wait = "settle"
+            self._scan_due = now + sc.cfg.settle_s
+            self.lbl_scan_prompt.configure(text=f"{what} · moving to {tgt:g} nm")
+        elif self._scan_wait == "settle" and now >= self._scan_due:
+            self.send("SND")
+            self._scan_wait = "read"
+            self._scan_due = now + 6
+        elif self._scan_wait == "read" and now >= self._scan_due:
+            self._raw(f"No reading at {tgt:g} nm; asking again.", "warn")
+            self._scan_wait = "settle"
+            self._scan_due = now
+
+    def _scan_take(self, r: g.Reading, source: str) -> bool:
+        """Offer a reading to the running scan. True if the scan used it."""
+        sc = self.scan
+        if sc is None or sc.state != "running" or self._scan_wait == "hold":
+            return False
+        tgt = sc.target()
+        mode = self._scan_mode()
+        a = r.absorbance
+        if a is None:
+            return False
+        if source == "SND":
+            if self._scan_wait != "read":
+                return False
+        else:                                                   # Print, guided mode
+            if mode != "guided":
+                return False
+            if r.wl is not None and abs(r.wl - tgt) > 1.0:
+                self._raw(f"Print says {r.wl:g} nm but the scan wants {tgt:g} nm: set {tgt:g} nm and press "
+                          "Print again.", "warn")
+                self.lbl_scan_prompt.configure(text=f"Wrong wavelength ({r.wl:g} nm). Set {tgt:g} nm, press Print.")
+                return True
+        label = sc.current.label
+        sc.record(a)
+        self._scan_wait = None
+        self._raw(f"{label} · {tgt:g} nm: A = {a:.4f}", "reading")
+        self.lbl_big.configure(text=f"{a:.4f}")
+        self.lbl_unit.configure(text="A")
+        self.lbl_src.configure(text=f"Scan · {tgt:g} nm · {datetime.now():%H:%M:%S}")
+        self._dirty.add("scan")
+        if sc.state == "done":
+            self._scan_finished(f"Scan finished: {len(sc.samples())} scan(s). Save the run to keep it.")
+        return True
+
+    def export_scan(self):
+        if not self.scan or not self.scan.passes:
+            messagebox.showinfo(APP_NAME, "No scan yet.")
+            return
+        path = filedialog.asksaveasfilename(parent=self.root, title="Export scan", defaultextension=".csv",
+                                            initialfile=f"scan-{datetime.now():%Y%m%d-%H%M}.csv",
+                                            filetypes=[("CSV", "*.csv")])
+        if path:
+            head, rows = self.scan.table()
+            with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+                w = csv.writer(fh)
+                w.writerow(head)
+                w.writerows(rows)
+            self.statusbar.configure(text=f"Saved the scan to {path}")
+
+    # ================================================================== saved runs (store & share)
+    def _later(self, fn):
+        self._ui_calls.put(fn)
+
+    def _open_path(self, path: str):
+        if not os.path.splitext(path)[1]:                       # a folder: make sure it exists
+            os.makedirs(path, exist_ok=True)
+        try:
+            os.startfile(path)                                  # Windows
+        except AttributeError:
+            webbrowser.open(f"file://{path}")
+
+    def choose_data_dir(self):
+        d = filedialog.askdirectory(parent=self.root, title="Folder for runs, presets and curves",
+                                    initialdir=self.data_dir)
+        if not d:
+            return
+        self.data_dir = d
+        self.s["data_dir"] = d
+        self.user_presets = presets.Store(os.path.join(d, "presets.json"))
+        self.curves = presets.Store(os.path.join(d, "calibrations.json"))
+        self.lbl_data_dir.configure(text=d)
+        self._fill_presets()
+        self.refresh_runs()
+        self.save_settings()
+
+    def _figures_png(self) -> dict[str, bytes]:
+        """Render every chart that has something on it."""
+        figs = {}
+        for name, has, draw, fig in (
+                ("live", bool(self.readings), self._draw_live, self.live_fig),
+                ("kinetics", len(self._kin_window()) >= 3, self._draw_kin, self.kin_fig),
+                ("calibration", bool(self.s.get("standards")), self._draw_cal, self.cal_fig),
+                ("spectrum", bool(self.s.get("spectrum")), self._draw_spec, self.spec_fig),
+                ("scan", bool(self.scan and self.scan.samples()), self._draw_scan, self.scan_fig)):
+            if not has:
+                continue
+            draw()
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=110)
+            figs[name] = buf.getvalue()
+        return figs
+
+    def _run_data(self, name: str, notes: str) -> dict:
+        cal = None
+        if self.s.get("standards"):
+            f = self.cal.fit if self.cal else None
+            cal = {"unit": self.v_cal_unit.get(), "standards": self.s["standards"],
+                   "fit": None if f is None else {"slope": f.slope, "intercept": f.intercept, "r2": f.r2, "n": f.n},
+                   "eps": self.cal.eps if self.cal else None, "lod": self.cal.lod if self.cal else None,
+                   "loq": self.cal.loq if self.cal else None}
+        kin = None
+        if self.kin:
+            k = self.kin
+            kin = {"basis": k.basis, "unit": k.unit, "best": k.best, "initial_rate": k.initial_rate,
+                   "fits": {str(o): {"k": f.k, "k_units": f.k_units, "r2": f.r2, "half_life_s": f.half_life_s,
+                                     "x0": f.x0, "used": f.used} for o, f in k.fits.items()}}
+        sc = None
+        if self.scan and self.scan.passes:
+            lmax = []
+            for p in self.scan.samples():
+                wl, a = self.scan.corrected(p)
+                ok = [(w, v) for w, v in zip(wl, a) if not math.isnan(v)]
+                lm = an.lambda_max([w for w, _ in ok], [v for _, v in ok]) if ok else None
+                if lm:
+                    lmax.append(lm[0])
+            sc = {"config": asdict(self.scan.cfg), "lambda_max": lmax,
+                  "passes": [{"kind": p.kind, "number": p.number, "t_start": p.t_start,
+                              "points": [[w, a] for w, a in p.points.items()]} for p in self.scan.passes]}
+        keep = ("t", "wall", "source", "kind", "value", "unit", "wl_printed", "wl", "A", "T", "conc", "conc_unit",
+                "conc_how", "text", "simulated", "verified")
+        return {"app": APP_NAME, "version": VERSION, "name": name, "notes": notes, "simulated": self.demo,
+                "instrument": dict(self.ident), "serial": self.serial_settings().describe(),
+                "sample": {k: self.s.get(k) for k in ("wl", "path", "species", "eps", "mw", "unit", "c0", "a_inf",
+                                                      "conc_method", "preset")},
+                "readings": [{k: r.get(k) for k in keep} for r in self.readings],
+                "marks": [list(m) for m in self.marks], "calibration": cal, "kinetics": kin,
+                "spectrum": self.s.get("spectrum", []), "scan": sc}
+
+    def save_run(self):
+        if not (self.readings or self.s.get("standards") or (self.scan and self.scan.passes)):
+            messagebox.showinfo(APP_NAME, "Nothing to save yet: take some readings, standards or a scan first.")
+            return
+        default = (self.v_preset.get().lstrip("★ ") or "Run")
+        name = simpledialog.askstring(APP_NAME, "Name this run:", initialvalue=default, parent=self.root)
+        if not name:
+            return
+        notes = simpledialog.askstring(APP_NAME, "Notes (sample, conditions, who ran it). Optional:",
+                                       parent=self.root) or ""
+        try:
+            folder = runs.save_run(self.data_dir, self._run_data(name.strip(), notes.strip()), self._figures_png(),
+                                   (list(self.CSV_FIELDS), [self._csv_row(r) for r in self.readings]),
+                                   self.scan.table() if self.scan and self.scan.passes else None)
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"Could not save the run:\n\n{exc}")
+            return
+        self.refresh_runs()
+        self.statusbar.configure(text=f"Saved run to {folder}")
+        self._dirty.update({"live", "kin", "cal", "spec", "scan"})
+        if messagebox.askyesno(APP_NAME, f"Saved '{name.strip()}'.\n\nOpen its report now?"):
+            self._open_path(os.path.join(folder, "report.html"))
+
+    def refresh_runs(self):
+        self.tv_runs.delete(*self.tv_runs.get_children())
+        self._run_rows = {}
+        for r in runs.list_runs(self.data_dir):
+            name = r["name"] + ("  (SIMULATED)" if r["simulated"] else "")
+            iid = self.tv_runs.insert("", "end", values=(r["saved"].replace("T", " ")[:16], name, r["readings"],
+                                                         r["wl"], r["notes"]))
+            self._run_rows[iid] = r
+
+    def _selected_run(self) -> dict | None:
+        sel = self.tv_runs.selection()
+        if not sel:
+            messagebox.showinfo(APP_NAME, "Pick a run in the list first.")
+            return None
+        return self._run_rows.get(sel[0])
+
+    def run_open_report(self):
+        r = self._selected_run()
+        if r:
+            self._open_path(os.path.join(r["folder"], "report.html"))
+
+    def run_open_folder(self):
+        r = self._selected_run()
+        if r:
+            self._open_path(r["folder"])
+
+    def run_share(self):
+        r = self._selected_run()
+        if not r:
+            return
+        dest = filedialog.asksaveasfilename(parent=self.root, title="Save the share package",
+                                            defaultextension=".zip", filetypes=[("Zip", "*.zip")],
+                                            initialfile=os.path.basename(r["folder"]) + ".zip")
+        if dest:
+            z = runs.share_zip(r["folder"], dest)
+            self.statusbar.configure(text=f"Share package: {z} (report.html, CSVs, charts)")
+
+    def run_copy_summary(self):
+        r = self._selected_run()
+        if r:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(runs.summary_text(runs.load_run(r["folder"])))
+            self.statusbar.configure(text="Summary copied: paste it into an email or chat.")
+
+    def run_delete(self):
+        r = self._selected_run()
+        if r and messagebox.askyesno(APP_NAME, f"Move '{r['name']}' to runs\\_deleted? (You can get it back "
+                                               "from there.)"):
+            runs.delete_run(r["folder"])
+            self.refresh_runs()
+
+    def run_load(self):
+        r = self._selected_run()
+        if not r:
+            return
+        if self.readings and not messagebox.askyesno(APP_NAME, "Replace what's on screen with this saved run? "
+                                                               "(Unsaved readings stay in the logs folder.)"):
+            return
+        self.load_run_data(runs.load_run(r["folder"]))
+
+    def load_run_data(self, d: dict):
+        rows = []
+        for x in d.get("readings", []):
+            row = {"t": 0.0, "wall": time.time(), "source": "Print", "kind": "A", "value": None, "unit": "",
+                   "wl_printed": None, "wl": None, "A": None, "T": None, "conc": None, "conc_unit": "",
+                   "conc_how": "", "text": "", "simulated": bool(d.get("simulated")), "verified": False}
+            row.update({k: v for k, v in x.items() if k in row})
+            rows.append(row)
+        self.readings = rows
+        self.marks = [tuple(m) for m in d.get("marks", [])]
+        s = d.get("sample") or {}
+        for k, var in (("wl", self.v_wl), ("path", self.v_path), ("species", self.v_species), ("eps", self.v_eps),
+                       ("mw", self.v_mw), ("unit", self.v_unit), ("c0", self.v_c0), ("a_inf", self.v_ainf),
+                       ("conc_method", self.v_method)):
+            if s.get(k) not in (None,):
+                var.set(s[k])
+        cal = d.get("calibration") or {}
+        self.s["standards"] = [list(x) for x in cal.get("standards", [])]
+        if cal.get("unit"):
+            self.v_cal_unit.set(cal["unit"])
+        self.s["spectrum"] = [list(x) for x in d.get("spectrum", [])]
+        self.tv_cal.delete(*self.tv_cal.get_children())
+        self.tv_spec.delete(*self.tv_spec.get_children())
+        self._load_tables()
+        self._recalibrate()
+        sc = d.get("scan")
+        self.scan = None
+        if sc and sc.get("passes"):
+            from scan import Pass
+            self.scan = ScanEngine(ScanConfig(**sc["config"]))
+            self.scan.passes = [Pass(p["kind"], p["number"], p.get("t_start"), {float(w): a for w, a in p["points"]})
+                                for p in sc["passes"]]
+            self.scan.state = "done"
+        self.t0 = None
+        self.last = self.readings[-1] if self.readings else None
+        if self.last:
+            self._show_now(self.last)
+        self._viewing = d.get("name")
+        self.csv_path = None
+        self.statusbar.configure(text=f"Viewing saved run '{d.get('name')}' ({d.get('saved', '')}).")
+        self._dirty.update({"live", "kin", "cal", "spec", "scan"})
+
+    # ================================================================== self-update
+    def check_updates(self, manual: bool = False):
+        if self._updating or self._closing:
+            return
+        if updater.is_dev_copy():
+            if manual:
+                self.statusbar.configure(text="This is the development copy: it doesn't update itself "
+                                              "(publish updates from it with tools/publish.py).")
+            return
+        if manual:
+            self.statusbar.configure(text="Checking for updates...")
+
+        def work():
+            try:
+                result, error = updater.check(), None
+            except Exception as exc:                       # offline, no release yet, ...
+                result, error = None, f"{type(exc).__name__}: {exc}"
+            self._later(lambda: self._update_checked(result, error, manual))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_checked(self, manifest, error, manual):
+        if manifest:
+            self._update_manifest = manifest
+            notes = (manifest.get("notes") or "").strip()
+            self.lbl_update.configure(text=f"Version {manifest['version']} is available (you have {VERSION})."
+                                           + (f"   What's new: {notes}" if notes else ""))
+            self.btn_update.state(["!disabled"])
+            self.update_bar.pack(side="top", fill="x", after=self._header)
+        elif manual:
+            self.statusbar.configure(text=f"Could not check for updates: {error}" if error
+                                     else f"You have the latest version ({VERSION}).")
+
+    def install_update(self):
+        m = self._update_manifest
+        if not m or self._updating:
+            return
+        if not messagebox.askyesno(APP_NAME, f"Update from {VERSION} to {m['version']}?\n\nThe new version is "
+                                             "downloaded and checked, then the app restarts. Your runs, "
+                                             "settings and logs are kept."):
+            return
+        self._updating = True
+        self.btn_update.state(["disabled"])
+        if self.link.is_open:
+            self.disconnect()
+
+        def say(text):
+            self._later(lambda: self.lbl_update.configure(text=text))
+
+        def work():
+            try:
+                changed = updater.apply(m, progress=say)
+                if "requirements.txt" in changed:
+                    say("Installing updated Python packages (this can take a minute)...")
+                    ok, log = updater.install_requirements()
+                    if not ok:
+                        raise updater.UpdateError("installing the Python packages failed:\n" + log[-600:])
+                self._later(lambda: self._update_done(m, changed, None))
+            except Exception as exc:
+                self._later(lambda e=exc: self._update_done(m, None, e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_done(self, manifest, changed, error):
+        self._updating = False
+        if error is not None:
+            self.lbl_update.configure(text=f"Update failed: {error}")
+            self.btn_update.state(["!disabled"])
+            messagebox.showerror(APP_NAME, f"The update did not install:\n\n{error}")
+            return
+        messagebox.showinfo(APP_NAME, f"Updated to version {manifest['version']} ({len(changed)} file(s) "
+                                      "changed). The app will now restart.")
+        updater.restart(sys.argv[1:])
+        self.on_close()
+
     # ================================================================== drawing
     def _redraw(self):
-        current = self.nb.index(self.nb.select())
-        todo = {0: "live", 1: "kin", 2: "cal", 3: "spec"}.get(current)
+        current = self.nb.tab(self.nb.select(), "text")
+        todo = {"Live": "live", "Kinetics": "kin", "Calibration": "cal", "Spectrum": "spec",
+                "Scan": "scan"}.get(current)
         if todo and todo in self._dirty:
             self._dirty.discard(todo)
             getattr(self, f"_draw_{todo}")()
-        if "kin" in self._dirty and current != 1:
-            pass  # drawn when the tab is shown
+
+    def _draw_scan(self):
+        ax = self.scan_ax
+        ax.clear()
+        self.tv_scan.delete(*self.tv_scan.get_children())
+        sc = self.scan
+        title = "Wavelength scans"
+        if sc and sc.passes:
+            samples = sc.samples()
+            if sc.blank and not samples:
+                pts = sorted(sc.blank.points.items())
+                ax.plot([w for w, _ in pts], [a for _, a in pts], "-", color=UI["muted"], lw=1.5,
+                        label="Blank (raw)")
+                title = "Blank pass (raw)"
+            n = len(samples)
+            for i, p in enumerate(samples):
+                wl, a = sc.corrected(p)
+                ok = [(w, v) for w, v in zip(wl, a) if not math.isnan(v)]
+                if not ok:
+                    continue
+                color = SCAN_RAMP[min(len(SCAN_RAMP) - 1, int(round(i * (len(SCAN_RAMP) - 1) / max(1, n - 1))))] \
+                    if n > 1 else SERIES["snd"]
+                label = f"{p.label} · {p.t_start / 60:.1f} min" if (n <= 8 or i in (0, n - 1)) else None
+                ax.plot([w for w, _ in ok], [v for _, v in ok], "-", color=color, lw=2, label=label, zorder=2)
+                if len(ok) <= 40:
+                    ax.plot([w for w, _ in ok], [v for _, v in ok], "o", color=color, zorder=3, **dict(MARK, ms=5))
+                lm = an.lambda_max([w for w, _ in ok], [v for _, v in ok])
+                self.tv_scan.insert("", "end", values=(p.label, f"{p.t_start / 60:.1f}",
+                                                       f"{lm[0]:.0f}" if lm else "-", f"{lm[1]:.4f}" if lm else "-"))
+                if lm and i == n - 1:
+                    ax.axvline(lm[0], color=UI["ink2"], lw=1, zorder=1)
+                    ax.annotate(f"λmax ≈ {lm[0]:.0f} nm", (lm[0], 1), xycoords=("data", "axes fraction"),
+                                textcoords="offset points", xytext=(6, -12), fontsize=9, color=UI["ink"],
+                                fontweight="semibold")
+            if n > 1 or (sc.blank and not samples):
+                ax.legend(loc="best")
+            if samples:
+                title = "Blank-corrected scans" if sc.blank else "Scans (not blank-corrected)"
+        ax.set_xlabel("Wavelength (nm)")
+        ax.set_ylabel("Absorbance (A)")
+        ax.set_title(title)
+        self.scan_canvas.draw_idle()
 
     def _times(self, rows):
         t = np.array([r["t"] for r in rows], dtype=float)
@@ -1350,7 +2156,7 @@ class App:
             k = self.kin
             names = {0: "Zero order  [R] vs t", 1: "First order  ln[R] vs t", 2: "Second order  1/[R] vs t"}
             short = {0: "Zero order · [R]", 1: "First order · ln[R]", 2: "Second order · 1/[R]"}
-            ylabs = {0: f"[R] ({k.unit})", 1: f"ln [R]", 2: f"1/[R] ({k.unit}⁻¹)"}
+            ylabs = {0: f"[R] ({k.unit})", 1: "ln [R]", 2: f"1/[R] ({k.unit}⁻¹)"}
             for o in (0, 1, 2):
                 f = k.fits[o]
                 self.tv_kin.insert("", "end", tags=("best",) if o == k.best else (), values=(
@@ -1497,7 +2303,14 @@ class App:
         except (ValueError, KeyError):
             pass
         self.s.update(decimal=self.v_decimal.get(), default_kind=self.v_kind.get(), live_y=self.v_live_y.get(),
-                      xunit=self.v_xunit.get(), cal_unit=self.v_cal_unit.get())
+                      xunit=self.v_xunit.get(), cal_unit=self.v_cal_unit.get(), preset=self.v_preset.get())
+        try:
+            cfg = self._scan_config()
+            self.s["scan"] = {"start": cfg.start, "stop": cfg.stop, "step": cfg.step, "blank_first": cfg.blank_first,
+                              "repeats": cfg.repeats, "interval_min": cfg.interval_s / 60, "settle_s": cfg.settle_s,
+                              "mode": self._scan_mode()}
+        except (ValueError, tk.TclError):
+            pass
         try:
             self.s["geometry"] = "zoomed" if self.root.state() == "zoomed" else self.root.geometry()
         except tk.TclError:
@@ -1517,6 +2330,11 @@ class App:
         self.link.close()
         if self.log:
             self.log.close()
+        if getattr(self, "_pump_id", None):
+            try:
+                self.root.after_cancel(self._pump_id)
+            except tk.TclError:
+                pass
         self.root.destroy()
 
 
