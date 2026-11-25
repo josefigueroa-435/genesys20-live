@@ -19,6 +19,7 @@ Events for the GUI arrive on `Link.events` as tuples:
     ("out", t, bytes)                   raw query sent
     ("line", t, bytes, source, cmd)     a complete line; source is "print" or "reply" (cmd = the query)
     ("timeout", t, cmd)                 a query got no answer in time
+    ("refused", t, cmd)                 the instrument answered ER/ERR (command not supported)
     ("error", t, message)               the port failed; the link has closed itself
     ("closed", t)
 t is time.time().
@@ -206,6 +207,10 @@ class Link:
                     self._pending.popleft()        # end of this query's answer
                     if not q.answered:
                         self.events.put(("timeout", time.time(), q.cmd))
+                    return
+                if word in ("ER", "ERR"):          # refused (GENESYS 20 says "ER", GENESYS 2/5 "ERR")
+                    self._pending.popleft()
+                    self.events.put(("refused", time.time(), q.cmd))
                     return
                 q.answered = True
                 q.t_last = now

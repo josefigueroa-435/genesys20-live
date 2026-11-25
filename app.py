@@ -1114,6 +1114,16 @@ class App:
                     self._raw("Turned hands-free readings off: the GENESYS didn't answer SND three times. "
                               "Check baud/parity/handshake/line end against Utility > RS232 on the "
                               "instrument, or use Print.", "warn")
+        elif kind == "refused":
+            cmd = ev[2]
+            self._raw(f"The GENESYS refused {cmd} (answered ER: not supported).", "warn", ev[1])
+            if self.scan and self.scan.state == "running" and self._scan_mode() == "command" \
+                    and cmd not in g.READ_ONLY_COMMANDS:
+                self.stop_scan()
+                messagebox.showwarning(APP_NAME, f"The GENESYS refused the set-wavelength command '{cmd}'. "
+                                                 "Check it against Thermo's RS232 command set, or use Guided.")
+            elif cmd == "SND":
+                self.snd_misses += 1
         elif kind == "error":
             self._raw(f"Port error: {ev[2]}", "warn", ev[1])
             messagebox.showwarning(APP_NAME, f"The serial port stopped working:\n\n{ev[2]}")

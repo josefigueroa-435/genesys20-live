@@ -290,6 +290,27 @@ class TestRealProtocol(unittest.TestCase):
         self.assertEqual([g.decode(e[2]) for e in evs if e[0] == "line"], ["0.1234"])
         self.assertFalse(any(e[0] == "timeout" for e in evs))
 
+    def test_refused_command_er(self):
+        """Exact reply of the real GENESYS 20 to an unsupported command (2026-11-25)."""
+        link = Link()
+        link.open(g.SerialSettings(port="X"), port=ScriptedPort({b"WAVELENGTH 550": b"WAVELENGTH 550\r\nER\r\n",
+                                                                 b"SND": b"SND\r\n1.3183\r\nOK\r\n"}))
+        try:
+            link.allow_wavelength_command("WAVELENGTH {wl}")
+            link.send("WAVELENGTH 550")
+            link.send("SND")
+            end, evs = time.time() + 1.5, []
+            while time.time() < end:
+                try:
+                    evs.append(link.events.get(timeout=0.05))
+                except Exception:
+                    pass
+        finally:
+            link.close()
+        self.assertIn(("refused", "WAVELENGTH 550"), [(e[0], e[2]) for e in evs if e[0] == "refused"])
+        lines = [(e[4], g.decode(e[2])) for e in evs if e[0] == "line"]
+        self.assertEqual(lines, [("SND", "1.3183")])          # ER is not mistaken for an answer
+
     def test_ok_without_answer_is_a_miss(self):
         evs = self.run_query(ScriptedPort({b"SND": b"SND\r\nOK\r\n"}), "SND")
         self.assertTrue(any(e[0] == "timeout" and e[2] == "SND" for e in evs))

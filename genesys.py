@@ -16,6 +16,9 @@ reports the wavelength. Print (Printer setup = Serial, Print WL = Yes) sends e.g
 wavelength, then absorbance with 3 decimals and its unit; lines can arrive split across chunks.
 A set-wavelength command must exist (Datalyse stepped wavelengths for its scans) but it is not public:
 never guess it, because this port also accepts wavelength-calibration table uploads (MONOTAB).
+Tested 2026-11-25 with Jose's OK: the GENESYS 2/5 commands WAVELENGTH (query), DATA and WAVELENGTH 550
+are all refused by this GENESYS 20 with "ER" (echo, then "ER"), and the wavelength does not move.
+The GENESYS 20's own RS232 command set has to come from Thermo.
 
 Wiring lesson: the GENESYS is DCE (transmits on pin 2). Jose's DTECH female USB adapter is ALSO wired
 DCE, so it only works through a male-to-female null-modem adapter.
