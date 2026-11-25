@@ -260,6 +260,31 @@ class TestRealProtocol(unittest.TestCase):
         self.assertEqual(got, [("MODEL", "GENESYS 20"), ("REV", "GENESYS 20 Revision = 2.10"),
                                ("SND", "0.0003"), ("SND", "0.0003")])
 
+    def test_captured_print_output(self):
+        """Exact chunks the real GENESYS sent for Print on 2026-11-25 (no query pending)."""
+        chunks = [b"   530nm  0.000 A\r\n", b"   530nm", b"  0.000 A\r\n", b"   530nm  1.330", b" A\r\n",
+                  b"   530nm  1.35", b"1 A\r\n"]
+        port = ScriptedPort({})
+        link = Link()
+        link.open(g.SerialSettings(port="X"), port=port)
+        try:
+            for c in chunks:
+                port.out += c
+                time.sleep(0.05)
+            end, evs = time.time() + 1.0, []
+            while time.time() < end:
+                try:
+                    evs.append(link.events.get(timeout=0.05))
+                except Exception:
+                    pass
+        finally:
+            link.close()
+        lines = [e for e in evs if e[0] == "line"]
+        self.assertEqual([e[3] for e in lines], ["print"] * 4)
+        got = [g.parse_line(g.decode(e[2])) for e in lines]
+        self.assertEqual([(r.wl, r.value, r.kind) for r in got],
+                         [(530.0, 0.0, "A"), (530.0, 0.0, "A"), (530.0, 1.33, "A"), (530.0, 1.351, "A")])
+
     def test_answer_without_ok_still_closes(self):
         evs = self.run_query(ScriptedPort({b"SND": b"SND\r\n0.1234\r\n"}), "SND", wait=2.0)
         self.assertEqual([g.decode(e[2]) for e in evs if e[0] == "line"], ["0.1234"])

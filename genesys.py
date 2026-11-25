@@ -12,7 +12,10 @@ Queries (from datalyse.dk, not in Thermo's user guide) VERIFIED on Jose's GENESY
 firmware "Revision = 2.10") on 2026-11-25 at 9600 8N1, CR+LF: every query is echoed, then answered,
 then closed with "OK".  MODEL -> "GENESYS 20";  REV -> "GENESYS 20 Revision = 2.10";
 SND -> the absorbance with 4 decimals, e.g. "0.0003". There is no scan command and no command that
-reports the wavelength.
+reports the wavelength. Print (Printer setup = Serial, Print WL = Yes) sends e.g. "   530nm  1.351 A\\r\\n":
+wavelength, then absorbance with 3 decimals and its unit; lines can arrive split across chunks.
+A set-wavelength command must exist (Datalyse stepped wavelengths for its scans) but it is not public:
+never guess it, because this port also accepts wavelength-calibration table uploads (MONOTAB).
 
 Wiring lesson: the GENESYS is DCE (transmits on pin 2). Jose's DTECH female USB adapter is ALSO wired
 DCE, so it only works through a male-to-female null-modem adapter.
