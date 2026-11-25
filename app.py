@@ -13,12 +13,16 @@ import argparse
 import csv
 import json
 import os
+import queue
+import re
 import sys
+import threading
 import time
 from datetime import datetime
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import font as tkfont
 
 
 def _require_packages() -> None:
@@ -43,8 +47,38 @@ import numpy as np  # noqa: E402
 import matplotlib  # noqa: E402
 
 matplotlib.use("TkAgg")
+from cycler import cycler  # noqa: E402  (ships with matplotlib)
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
+
+# ---------------------------------------------------------------- look
+# Neutral surfaces + one accent, from the dataviz reference palette. Chart series colours were run
+# through its validator (blue/orange/aqua: CVD-safe all-pairs; aqua is light, so it always gets a label).
+UI = {
+    "page": "#f1f0ec", "surface": "#fcfcfb", "border": "#e1e0d9", "field": "#ffffff",
+    "ink": "#0b0b0b", "ink2": "#52514e", "muted": "#898781", "axis": "#c3c2b7",
+    "accent": "#2a78d6", "accent_hover": "#256abf", "accent_soft": "#e8f1fc",
+    "header": "#1a1a19", "header_ink": "#f0efec", "header_muted": "#a6a59c",
+    "button": "#f0efec", "button_hover": "#e6e5df",
+}
+SERIES = {"snd": "#2a78d6", "print": "#eb6834", "sample": "#1baf7a", "fit": "#52514e"}
+FONT = "Segoe UI"
+
+matplotlib.rcParams.update({
+    "font.family": "sans-serif", "font.sans-serif": [FONT, "DejaVu Sans"], "font.size": 9,
+    "figure.facecolor": UI["surface"], "axes.facecolor": UI["surface"], "savefig.facecolor": UI["surface"],
+    "axes.edgecolor": UI["axis"], "axes.linewidth": 0.8, "axes.labelcolor": UI["ink2"],
+    "axes.titlesize": 10, "axes.titleweight": "semibold", "axes.titlecolor": UI["ink"],
+    "axes.titlelocation": "left", "axes.titlepad": 8,
+    "axes.spines.top": False, "axes.spines.right": False,
+    "axes.grid": True, "grid.color": UI["border"], "grid.linewidth": 0.8, "grid.linestyle": "-",
+    "xtick.color": UI["axis"], "ytick.color": UI["axis"], "xtick.labelcolor": UI["ink2"],
+    "ytick.labelcolor": UI["ink2"], "legend.frameon": False, "legend.fontsize": 8.5,
+    "legend.labelcolor": UI["ink2"], "lines.linewidth": 2, "lines.solid_capstyle": "round",
+    "axes.prop_cycle": cycler(color=[SERIES["snd"], SERIES["print"], SERIES["sample"]]),
+})
+# markers: >= 8 px with a 1.5 px ring in the surface colour so they stay legible over lines
+MARK = dict(ms=6.5, mec=UI["surface"], mew=1.5)
 
 import analysis as an  # noqa: E402
 import genesys as g  # noqa: E402
@@ -52,7 +86,7 @@ from link import Link  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP_NAME = "GENESYS 20 Live"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 DEFAULTS = {
     "serial": g.SerialSettings().to_dict(),
@@ -84,12 +118,12 @@ DEFAULTS = {
 DEMO_SAMPLE = {"wl": "590", "eps": "87000", "unit": "µM", "species": "reactant", "a_inf": "0.004",
                "path": "1.000"}
 
-STATUS_STYLE = {
-    "off": ("Not connected", "#6b7280"),
-    "open": ("Port open - waiting for a reading (press Print, or ask with SND)", "#b45309"),
-    "bytes": ("Receiving - reading format NOT yet checked against the display", "#1d4ed8"),
-    "verified": ("Receiving - reading format checked against the display", "#15803d"),
-    "sim": ("SIMULATED instrument (demo) - not real data", "#7e22ce"),
+STATUS_STYLE = {   # text, background, text colour (status colours always come with words)
+    "off": ("Not connected", "#3a3a37", "#d8d7d0"),
+    "open": ("Connected · waiting for a reading", "#fab219", "#0b0b0b"),
+    "bytes": ("Receiving · format not yet checked", "#2a78d6", "#ffffff"),
+    "verified": ("Receiving · format checked", "#0ca30c", "#ffffff"),
+    "sim": ("SIMULATED instrument · not real data", "#6250d6", "#ffffff"),
 }
 PARITY_NAMES = {"N": "None", "E": "Even", "O": "Odd"}
 FLOW_NAMES = {"none": "Off", "rtscts": "CTS/RTS", "xonxoff": "XON/XOFF"}
@@ -117,22 +151,40 @@ def fmt_sig(x: float | None, sig: int = 4) -> str:
     return f"{x:.{sig - 1}e}"
 
 
-def list_ports() -> list[str]:
+ADAPTER_WORDS = ("prolific", "usb-to-serial", "usb serial", "ftdi", "ch340", "cp210", "usb-serial", "uart")
+
+
+def list_ports() -> list[tuple[str, str]]:
+    """[(device, friendly label)] for wired serial ports, USB adapters first. Bluetooth 'serial' links are
+    left out: they are never the GENESYS and there are usually several of them."""
     try:
         from serial.tools import list_ports as lp
-        return [f"{p.device} - {p.description}" for p in sorted(lp.comports(), key=lambda p: p.device)]
+        found = list(lp.comports())
     except Exception:
         return []
+    out = []
+    for p in found:
+        desc = p.description or ""
+        if "bluetooth" in desc.lower():
+            continue
+        name = re.sub(r"\s*\(COM\d+\)\s*$", "", desc).replace(" Comm Port", "").strip() or "Serial port"
+        out.append((p.device, f"{p.device}  ·  {name}"))
+
+    def rank(item):
+        num = int(re.sub(r"\D", "", item[0]) or 0)
+        return (0 if any(w in item[1].lower() for w in ADAPTER_WORDS) else 1, num)
+
+    return sorted(out, key=rank)
 
 
 class ScrollFrame(ttk.Frame):
     """A vertically scrolling frame for the sidebar."""
 
     def __init__(self, master, width=330):
-        super().__init__(master)
-        self.canvas = tk.Canvas(self, width=width, highlightthickness=0, borderwidth=0)
+        super().__init__(master, style="Page.TFrame")
+        self.canvas = tk.Canvas(self, width=width, highlightthickness=0, borderwidth=0, bg=UI["page"])
         bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.body = ttk.Frame(self.canvas)
+        self.body = ttk.Frame(self.canvas, style="Page.TFrame")
         self.body.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self._win = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
@@ -182,6 +234,7 @@ class App:
         self._dirty = {"live", "kin", "cal", "spec"}
         self._last_draw = 0.0
         self._closing = False
+        self._ports_q: queue.SimpleQueue | None = None
 
         root.title(f"{APP_NAME} {VERSION}" + ("  -  SIMULATED INSTRUMENT (demo)" if demo else ""))
         root.minsize(960, 560)
@@ -198,28 +251,92 @@ class App:
         self._recalibrate()
         self._set_status("sim" if demo else "off")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        if not demo:
+            self._start_port_watch()
         root.after(100, self._pump)
         if demo and auto_connect:
             self.connect()
 
     # ================================================================== layout
     def _style(self):
-        st = ttk.Style(self.root)
-        try:
-            st.theme_use("vista" if sys.platform == "win32" else "clam")
-        except tk.TclError:
-            pass
-        st.configure("Big.TLabel", font=("Segoe UI", 30, "bold"))
-        st.configure("Sub.TLabel", font=("Segoe UI", 11))
-        st.configure("Hint.TLabel", foreground="#555555", font=("Segoe UI", 9))
-        st.configure("Head.TLabel", font=("Segoe UI", 10, "bold"))
+        r = self.root
+        r.configure(bg=UI["page"])
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            try:
+                tkfont.nametofont(name).configure(family=FONT, size=10)
+            except tk.TclError:
+                pass
+        r.option_add("*TCombobox*Listbox.font", (FONT, 10))
+        r.option_add("*TCombobox*Listbox.background", UI["field"])
+        r.option_add("*TCombobox*Listbox.selectBackground", UI["accent"])
+        r.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        st = ttk.Style(r)
+        st.theme_use("clam")                       # fully stylable on every platform
+        S, B = UI["surface"], UI["border"]
+        st.configure(".", background=S, foreground=UI["ink"], font=(FONT, 10), bordercolor=B,
+                     lightcolor=S, darkcolor=S, troughcolor=UI["page"], focuscolor=UI["accent"],
+                     selectbackground=UI["accent"], selectforeground="#ffffff")
+        st.configure("Page.TFrame", background=UI["page"])
+        st.configure("TLabel", background=S, foreground=UI["ink"])
+        st.configure("Big.TLabel", font=(FONT, 30, "bold"), foreground=UI["ink"])
+        st.configure("Unit.TLabel", font=(FONT, 13), foreground=UI["ink2"])
+        st.configure("Sub.TLabel", font=(FONT, 10), foreground=UI["ink2"])
+        st.configure("Hint.TLabel", foreground=UI["muted"], font=(FONT, 9))
+        st.configure("Head.TLabel", font=(FONT, 9, "bold"), foreground=UI["ink2"])
+        st.configure("CardTitle.TLabel", font=(FONT, 10, "bold"), foreground=UI["ink"])
+        st.configure("Status.TLabel", background=UI["page"], foreground=UI["muted"], font=(FONT, 9))
+        # buttons: quiet default, one blue accent for the main action
+        st.configure("TButton", background=UI["button"], foreground=UI["ink"], bordercolor=B,
+                     lightcolor=UI["button"], darkcolor=UI["button"], padding=(10, 4), relief="flat")
+        st.map("TButton", background=[("pressed", UI["axis"]), ("active", UI["button_hover"])],
+               lightcolor=[("active", UI["button_hover"])], darkcolor=[("active", UI["button_hover"])])
+        st.configure("Accent.TButton", background=UI["accent"], foreground="#ffffff", bordercolor=UI["accent"],
+                     lightcolor=UI["accent"], darkcolor=UI["accent"], font=(FONT, 10, "bold"), padding=(12, 6))
+        st.map("Accent.TButton", background=[("pressed", "#1c5cab"), ("active", UI["accent_hover"])],
+               lightcolor=[("active", UI["accent_hover"])], darkcolor=[("active", UI["accent_hover"])])
+        st.configure("Link.TButton", background=S, foreground=UI["accent"], bordercolor=S, lightcolor=S,
+                     darkcolor=S, padding=(2, 0), font=(FONT, 9))
+        st.map("Link.TButton", background=[("active", UI["accent_soft"])],
+               lightcolor=[("active", UI["accent_soft"])], darkcolor=[("active", UI["accent_soft"])])
+        # inputs
+        for w in ("TEntry", "TCombobox", "TSpinbox"):
+            st.configure(w, fieldbackground=UI["field"], bordercolor=UI["axis"], lightcolor=UI["field"],
+                         darkcolor=UI["field"], arrowcolor=UI["ink2"], padding=(6, 3), insertcolor=UI["ink"])
+            st.map(w, bordercolor=[("focus", UI["accent"])], lightcolor=[("focus", UI["accent"])],
+                   fieldbackground=[("disabled", UI["page"]), ("readonly", UI["field"])],
+                   foreground=[("disabled", UI["muted"])])
+        st.configure("TCombobox", background=UI["field"])
+        st.map("TCombobox", background=[("active", UI["field"]), ("readonly", UI["field"])])
+        for w in ("TCheckbutton", "TRadiobutton"):
+            st.configure(w, background=S, indicatorbackground=UI["field"], indicatorforeground=UI["accent"],
+                         upperbordercolor=UI["axis"], lowerbordercolor=UI["axis"], padding=(0, 2))
+            st.map(w, background=[("active", S)], indicatorbackground=[("selected", UI["accent_soft"])])
+        # tabs
+        st.configure("TNotebook", background=UI["page"], bordercolor=B, tabmargins=(0, 0, 0, 0))
+        st.configure("TNotebook.Tab", background=UI["page"], foreground=UI["ink2"], padding=(16, 7),
+                     bordercolor=UI["page"], lightcolor=UI["page"], font=(FONT, 10))
+        st.map("TNotebook.Tab", background=[("selected", S), ("active", UI["button_hover"])],
+               foreground=[("selected", UI["ink"])], font=[("selected", (FONT, 10, "bold"))],
+               bordercolor=[("selected", B)], lightcolor=[("selected", S)])
+        # tables, scrollbars, panes
+        st.configure("Treeview", background=S, fieldbackground=S, foreground=UI["ink"], rowheight=24,
+                     bordercolor=B, lightcolor=S, darkcolor=S)
+        st.map("Treeview", background=[("selected", UI["accent_soft"])], foreground=[("selected", UI["ink"])])
+        st.configure("Treeview.Heading", background=UI["button"], foreground=UI["ink2"], font=(FONT, 9, "bold"),
+                     bordercolor=B, lightcolor=UI["button"], darkcolor=UI["button"], relief="flat")
+        st.configure("TScrollbar", background=UI["button"], troughcolor=UI["page"], bordercolor=UI["page"],
+                     lightcolor=UI["button"], darkcolor=UI["button"], arrowcolor=UI["muted"], gripcount=0)
+        st.configure("TPanedwindow", background=UI["page"])
+        st.configure("Sash", sashthickness=6, background=UI["page"], lightcolor=UI["page"], bordercolor=UI["page"])
 
     def _build(self):
         r = self.root
-        self._build_connection_bar(r)
+        self._build_header(r)
+        self.statusbar = ttk.Label(r, text="", style="Status.TLabel", anchor="w")
+        self.statusbar.pack(side="bottom", fill="x", padx=14, pady=(0, 6))
         main = ttk.PanedWindow(r, orient="horizontal")
-        main.pack(fill="both", expand=True, padx=6, pady=(0, 4))
-        side = ScrollFrame(main)
+        main.pack(fill="both", expand=True, padx=(4, 12), pady=(10, 6))
+        side = ScrollFrame(main, width=340)
         main.add(side, weight=0)
         self._build_sidebar(side.body)
         self.nb = ttk.Notebook(main)
@@ -230,16 +347,37 @@ class App:
         self._build_spec_tab()
         self._build_raw_tab()
         self.nb.bind("<<NotebookTabChanged>>", lambda e: self._dirty.update({"live", "kin", "cal", "spec"}))
-        self.statusbar = ttk.Label(r, text="", style="Hint.TLabel", anchor="w")
-        self.statusbar.pack(fill="x", padx=8, pady=(0, 4))
 
-    def _build_connection_bar(self, r):
-        top = ttk.Frame(r, padding=(6, 6, 6, 0))
-        top.pack(fill="x")
-        bar = ttk.Frame(r, padding=(6, 4, 6, 4))
+    def _build_header(self, r):
+        bar = tk.Frame(r, bg=UI["header"], height=52)
         bar.pack(fill="x")
+        bar.pack_propagate(False)
+        tk.Label(bar, text="GENESYS 20 Live", bg=UI["header"], fg=UI["header_ink"],
+                 font=(FONT, 14, "bold")).pack(side="left", padx=(16, 8))
+        tk.Label(bar, text=f"v{VERSION}  ·  Thermo Scientific GENESYS 20", bg=UI["header"],
+                 fg=UI["header_muted"], font=(FONT, 9)).pack(side="left", pady=(4, 0))
+        self.lbl_status = tk.Label(bar, text="", font=(FONT, 9, "bold"), padx=12, pady=4)
+        self.lbl_status.pack(side="right", padx=16)
+
+    def _card(self, parent, title, right=None):
+        """A white card with a hairline border on the page background. Returns the inner frame."""
+        outer = tk.Frame(parent, bg=UI["border"], padx=1, pady=1)
+        outer.pack(fill="x", padx=(10, 6), pady=(0, 10))
+        inner = ttk.Frame(outer, padding=(14, 10, 14, 12))
+        inner.pack(fill="both", expand=True)
+        head = ttk.Frame(inner)
+        head.pack(fill="x", pady=(0, 8))
+        ttk.Label(head, text=title, style="CardTitle.TLabel").pack(side="left")
+        if right is not None:
+            right(head)
+        return inner
+
+    _section = _card
+
+    def _build_connection_card(self, p):
         ser = g.SerialSettings.from_dict(self.s["serial"])
-        self.v_port = tk.StringVar(value=ser.port)
+        self.v_port = tk.StringVar(value=ser.port)          # the device, e.g. "COM12"
+        self.v_port_label = tk.StringVar()                  # what the dropdown shows
         self.v_baud = tk.StringVar(value=str(ser.baud))
         self.v_bits = tk.StringVar(value=str(ser.bits))
         self.v_parity = tk.StringVar(value=PARITY_NAMES[ser.parity])
@@ -247,46 +385,81 @@ class App:
         self.v_flow = tk.StringVar(value=FLOW_NAMES[ser.flow])
         self.v_term = tk.StringVar(value=ser.terminator)
         self.v_decimal = tk.StringVar(value=self.s["decimal"])
+        self._port_map: dict[str, str] = {}
 
-        def field(label, var, values, width):
-            ttk.Label(bar, text=label).pack(side="left", padx=(8, 2))
-            cb = ttk.Combobox(bar, textvariable=var, values=values, width=width, state="readonly")
-            cb.pack(side="left")
-            return cb
+        f = self._card(p, "Connection")
+        self.cb_port = ttk.Combobox(f, textvariable=self.v_port_label, state="readonly",
+                                    postcommand=self.refresh_ports)
+        self.cb_port.pack(fill="x")
+        self.cb_port.bind("<<ComboboxSelected>>", self._port_chosen)
+        self.lbl_port_hint = ttk.Label(f, text="", style="Hint.TLabel", wraplength=290)
+        self.lbl_port_hint.pack(anchor="w", pady=(3, 0))
+        self.btn_connect = ttk.Button(f, text="Connect", style="Accent.TButton", command=self.toggle_connect)
+        self.btn_connect.pack(fill="x", pady=(8, 0))
 
-        ttk.Label(top, text="Port").pack(side="left")
-        self.cb_port = ttk.Combobox(top, textvariable=self.v_port, width=34)
-        self.cb_port.pack(side="left", padx=(2, 0))
-        ttk.Button(top, text="↻", width=3, command=self.refresh_ports).pack(side="left", padx=2)
-        self.btn_connect = ttk.Button(top, text="Connect", command=self.toggle_connect, width=12)
-        self.btn_connect.pack(side="left", padx=(10, 6))
-        self.lbl_status = tk.Label(top, text="", fg="white", bg="#6b7280", padx=8, pady=2,
-                                   font=("Segoe UI", 9, "bold"))
-        self.lbl_status.pack(side="left", padx=4)
-        ttk.Label(bar, text="Must match Utility > RS232 on the GENESYS:", style="Hint.TLabel").pack(side="left")
-        field("Baud", self.v_baud, [str(b) for b in g.BAUDS], 6)
-        field("Bits", self.v_bits, ["8", "7"], 3)
-        field("Parity", self.v_parity, list(PARITY_NAMES.values()), 6)
-        field("Stop", self.v_stop, ["1", "2"], 3)
-        field("Handshake", self.v_flow, list(FLOW_NAMES.values()), 9)
-        field("Line end", self.v_term, list(g.TERMINATORS), 6)
-        field("Decimal", self.v_decimal, [".", ","], 3)
+        # serial settings: one summary line, the seven fields only when you open it
+        sep = tk.Frame(f, bg=UI["border"], height=1)
+        sep.pack(fill="x", pady=(12, 8))
+        row = ttk.Frame(f)
+        row.pack(fill="x")
+        ttk.Label(row, text="Serial settings", style="Head.TLabel").pack(side="left")
+        self.btn_serial = ttk.Button(row, text="Edit ▾", style="Link.TButton", command=self._toggle_serial)
+        self.btn_serial.pack(side="right")
+        self.lbl_serial = ttk.Label(f, text="", style="Sub.TLabel")
+        self.lbl_serial.pack(anchor="w", pady=(2, 0))
+        self.serial_box = ttk.Frame(f)
+        ttk.Label(self.serial_box, text="Must match Utility > RS232 on the GENESYS.",
+                  style="Hint.TLabel").grid(row=0, column=0, columnspan=4, sticky="w", pady=(6, 4))
+        fields = [("Baud", self.v_baud, [str(b) for b in g.BAUDS]), ("Data bits", self.v_bits, ["8", "7"]),
+                  ("Parity", self.v_parity, list(PARITY_NAMES.values())), ("Stop bits", self.v_stop, ["1", "2"]),
+                  ("Handshake", self.v_flow, list(FLOW_NAMES.values())), ("Line end", self.v_term, list(g.TERMINATORS)),
+                  ("Decimal", self.v_decimal, [".", ","])]
+        self._serial_widgets = []
+        for i, (lab, var, values) in enumerate(fields):
+            r_, c = divmod(i, 2)
+            ttk.Label(self.serial_box, text=lab, style="Hint.TLabel").grid(row=1 + 2 * r_, column=c, sticky="w",
+                                                                          padx=(0, 8))
+            cb = ttk.Combobox(self.serial_box, textvariable=var, values=values, state="readonly", width=11)
+            cb.grid(row=2 + 2 * r_, column=c, sticky="we", padx=(0, 8), pady=(0, 6))
+            self._serial_widgets.append(cb)
+            var.trace_add("write", lambda *a: self._serial_summary())
+        self.serial_box.columnconfigure((0, 1), weight=1)
+        self._serial_summary()
         self.refresh_ports()
 
-    def _section(self, parent, title):
-        f = ttk.LabelFrame(parent, text=title, padding=(8, 4))
-        f.pack(fill="x", padx=4, pady=4)
-        return f
+    def _toggle_serial(self):
+        if self.serial_box.winfo_ismapped():
+            self.serial_box.pack_forget()
+            self.btn_serial.configure(text="Edit ▾")
+        else:
+            self.serial_box.pack(fill="x")
+            self.btn_serial.configure(text="Hide ▴")
+
+    def _serial_summary(self):
+        par = {v: k for k, v in PARITY_NAMES.items()}.get(self.v_parity.get(), "?")
+        flow = self.v_flow.get()
+        flow = "no handshake" if flow == "Off" else flow
+        term = {"CRLF": "CR+LF"}.get(self.v_term.get(), self.v_term.get())
+        self.lbl_serial.configure(text=f"{self.v_baud.get()} baud  {self.v_bits.get()}{par}{self.v_stop.get()}  ·  "
+                                       f"{flow}  ·  {term}")
 
     def _build_sidebar(self, p):
+        self._build_connection_card(p)
+        if self.demo:
+            self.cb_port.configure(state="disabled")
+            self.v_port_label.set("Simulated GENESYS 20")
         # --- reading now
-        f = self._section(p, "Reading now")
-        self.lbl_big = ttk.Label(f, text="---", style="Big.TLabel")
-        self.lbl_big.pack(anchor="w")
+        f = self._card(p, "Reading now")
+        row = ttk.Frame(f)
+        row.pack(anchor="w")
+        self.lbl_big = ttk.Label(row, text="—", style="Big.TLabel")
+        self.lbl_big.pack(side="left")
+        self.lbl_unit = ttk.Label(row, text="", style="Unit.TLabel")
+        self.lbl_unit.pack(side="left", padx=(6, 0), pady=(14, 0))
         self.lbl_sub = ttk.Label(f, text="", style="Sub.TLabel")
         self.lbl_sub.pack(anchor="w")
-        self.lbl_src = ttk.Label(f, text="No readings yet", style="Hint.TLabel", wraplength=300)
-        self.lbl_src.pack(anchor="w")
+        self.lbl_src = ttk.Label(f, text="No readings yet", style="Hint.TLabel", wraplength=290)
+        self.lbl_src.pack(anchor="w", pady=(4, 0))
 
         # --- live readings
         f = self._section(p, "Hands-free readings")
@@ -305,8 +478,8 @@ class App:
         row.pack(fill="x", pady=(4, 0))
         ttk.Button(row, text="Ask once (SND)", command=lambda: self.send("SND")).pack(side="left")
         ttk.Button(row, text="Identify", command=self.identify).pack(side="left", padx=4)
-        ttk.Label(f, text="Uses the read-only query SND (absorbance only). Pressing Print on the "
-                          "GENESYS always works too.", style="Hint.TLabel", wraplength=300).pack(anchor="w", pady=(4, 0))
+        ttk.Label(f, text="Sends the read-only query SND (absorbance only); nothing on the GENESYS changes.",
+                  style="Hint.TLabel", wraplength=290).pack(anchor="w", pady=(6, 0))
 
         # --- run
         f = self._section(p, "Run")
@@ -361,7 +534,7 @@ class App:
         ttk.Label(grid, text="Starting conc. c₀ (in the unit above)").grid(row=1, column=0, sticky="w")
         ttk.Entry(grid, textvariable=self.v_c0, width=10).grid(row=1, column=1, padx=(6, 0))
         ttk.Label(f, text="Leave ε empty to work in absorbance (first-order k doesn't need it).",
-                  style="Hint.TLabel", wraplength=300).pack(anchor="w", pady=(4, 0))
+                  style="Hint.TLabel", wraplength=290).pack(anchor="w", pady=(4, 0))
         for v in (self.v_wl, self.v_path, self.v_species, self.v_eps, self.v_mw, self.v_unit, self.v_c0,
                   self.v_ainf, self.v_method):
             v.trace_add("write", lambda *a: self._sample_changed())
@@ -383,25 +556,31 @@ class App:
                 anchor="w", pady=(4, 0))
             ttk.Label(f, text="The simulated dye has ε = 87,000 at 590 nm (a broad band); its wavelength "
                               "follows the box above. Made-up numbers for trying the app.",
-                      style="Hint.TLabel", wraplength=300).pack(anchor="w", pady=(4, 0))
+                      style="Hint.TLabel", wraplength=290).pack(anchor="w", pady=(4, 0))
 
     def _figure(self, parent, nrows=1, ncols=1, **kw):
         fig = Figure(figsize=(6, 3.4), dpi=100, layout="constrained")
         axes = fig.subplots(nrows, ncols, **kw)
         canvas = FigureCanvasTkAgg(fig, master=parent)
+        canvas.get_tk_widget().configure(bg=UI["surface"], highlightthickness=0)
         tb = NavigationToolbar2Tk(canvas, parent, pack_toolbar=False)
         tb.update()
+        for w in [tb, *tb.winfo_children()]:          # blend the zoom/pan/save bar into the card
+            try:
+                w.configure(bg=UI["surface"])
+            except tk.TclError:
+                pass
         tb.pack(side="bottom", fill="x")
         canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
         return fig, axes, canvas
 
     def _watermark(self, fig):
         if self.demo:
-            fig.text(0.5, 0.5, "SIMULATED", fontsize=46, color="#7e22ce", alpha=0.10, ha="center",
-                     va="center", rotation=20)
+            fig.text(0.5, 0.5, "SIMULATED", fontsize=46, color=STATUS_STYLE["sim"][1], alpha=0.08,
+                     ha="center", va="center", rotation=20, fontweight="bold")
 
     def _build_live_tab(self):
-        tab = ttk.Frame(self.nb, padding=4)
+        tab = ttk.Frame(self.nb, padding=(14, 12, 14, 8))
         self.nb.add(tab, text="Live")
         row = ttk.Frame(tab)
         row.pack(fill="x")
@@ -423,7 +602,7 @@ class App:
         self._watermark(self.live_fig)
 
     def _build_kin_tab(self):
-        tab = ttk.Frame(self.nb, padding=4)
+        tab = ttk.Frame(self.nb, padding=(14, 12, 14, 8))
         self.nb.add(tab, text="Kinetics")
         row = ttk.Frame(tab)
         row.pack(fill="x")
@@ -447,7 +626,7 @@ class App:
                                          ("Half-life", 110), ("Start amount", 110), ("Points", 70)]):
             self.tv_kin.heading(c, text=title)
             self.tv_kin.column(c, width=w, anchor="center")
-        self.tv_kin.tag_configure("best", background="#dcfce7")
+        self.tv_kin.tag_configure("best", background=UI["accent_soft"], font=(FONT, 10, "bold"))
         self.tv_kin.pack(fill="x", pady=4)
         self.lbl_kin_rate = ttk.Label(tab, text="", style="Sub.TLabel")
         self.lbl_kin_rate.pack(fill="x")
@@ -457,7 +636,7 @@ class App:
         self._watermark(self.kin_fig)
 
     def _build_cal_tab(self):
-        tab = ttk.Frame(self.nb, padding=4)
+        tab = ttk.Frame(self.nb, padding=(14, 12, 14, 8))
         self.nb.add(tab, text="Calibration")
         left = ttk.Frame(tab, width=330)
         left.pack(side="left", fill="y", padx=(0, 6))
@@ -469,8 +648,8 @@ class App:
         ttk.Entry(row, textvariable=self.v_cal_c, width=9).pack(side="left", padx=3)
         ttk.Combobox(row, textvariable=self.v_cal_unit, values=an.UNITS, state="readonly", width=7).pack(side="left")
         self.v_cal_unit.trace_add("write", lambda *a: self._recalibrate())
-        ttk.Button(left, text="Add the current reading as this standard", command=self.add_standard).pack(
-            fill="x", pady=4)
+        ttk.Button(left, text="Add the current reading as this standard", style="Accent.TButton",
+                   command=self.add_standard).pack(fill="x", pady=(8, 8))
         self.tv_cal = ttk.Treeview(left, columns=("c", "a", "wl"), show="headings", height=7)
         for c, t, w in (("c", "Concentration", 110), ("a", "Absorbance", 100), ("wl", "λ (nm)", 70)):
             self.tv_cal.heading(c, text=t)
@@ -491,11 +670,11 @@ class App:
         self._watermark(self.cal_fig)
 
     def _build_spec_tab(self):
-        tab = ttk.Frame(self.nb, padding=4)
+        tab = ttk.Frame(self.nb, padding=(14, 12, 14, 8))
         self.nb.add(tab, text="Spectrum")
         left = ttk.Frame(tab, width=330)
         left.pack(side="left", fill="y", padx=(0, 6))
-        ttk.Button(left, text="Add the current reading at the wavelength box λ",
+        ttk.Button(left, text="Add the current reading at λ", style="Accent.TButton",
                    command=self.add_spec_point).pack(fill="x")
         self.v_spec_auto = tk.BooleanVar(value=False)
         ttk.Checkbutton(left, text="Add every new reading here", variable=self.v_spec_auto).pack(anchor="w", pady=4)
@@ -521,7 +700,7 @@ class App:
         self._watermark(self.spec_fig)
 
     def _build_raw_tab(self):
-        tab = ttk.Frame(self.nb, padding=4)
+        tab = ttk.Frame(self.nb, padding=(14, 12, 14, 8))
         self.nb.add(tab, text="Raw data")
         top = ttk.Frame(tab)
         top.pack(fill="x")
@@ -531,42 +710,88 @@ class App:
         ttk.Label(top, text="Bare numbers are read as").pack(side="left", padx=(16, 2))
         self.v_kind = tk.StringVar(value=self.s["default_kind"])
         ttk.Combobox(top, textvariable=self.v_kind, values=("A", "%T"), state="readonly", width=4).pack(side="left")
-        ver = ttk.LabelFrame(tab, text="Check the format once", padding=6)
-        ver.pack(fill="x", pady=6)
-        self.lbl_verify = ttk.Label(ver, text="No reading yet.", wraplength=900)
-        self.lbl_verify.pack(anchor="w")
+        ver_outer = tk.Frame(tab, bg=UI["border"], padx=1, pady=1)
+        ver_outer.pack(fill="x", pady=(10, 10))
+        ver = ttk.Frame(ver_outer, padding=(12, 10))
+        ver.pack(fill="x")
+        ttk.Label(ver, text="Check the format once", style="CardTitle.TLabel").pack(anchor="w")
+        self.lbl_verify = ttk.Label(ver, text="No reading yet.", wraplength=900, style="Sub.TLabel")
+        self.lbl_verify.pack(anchor="w", pady=(4, 0))
         row = ttk.Frame(ver)
-        row.pack(anchor="w", pady=(4, 0))
-        ttk.Button(row, text="Yes, it matches the GENESYS display", command=lambda: self.verify(True)).pack(side="left")
-        ttk.Button(row, text="No, it doesn't", command=lambda: self.verify(False)).pack(side="left", padx=6)
-        ttk.Label(ver, text="First connection test without any commands: on the GENESYS press Utility, scroll to "
-                            "RS232, and press Print. Its RS232 settings should appear below. Then set Utility > "
-                            "Printer setup to Serial, measure, and press Print.",
-                  style="Hint.TLabel", wraplength=900).pack(anchor="w", pady=(6, 0))
-        frame = ttk.Frame(tab)
+        row.pack(anchor="w", pady=(8, 0))
+        ttk.Button(row, text="Yes, it matches the GENESYS display", style="Accent.TButton",
+                   command=lambda: self.verify(True)).pack(side="left")
+        ttk.Button(row, text="No, it doesn't", command=lambda: self.verify(False)).pack(side="left", padx=8)
+        frame = tk.Frame(tab, bg=UI["border"], padx=1, pady=1)
         frame.pack(fill="both", expand=True)
-        self.txt = tk.Text(frame, font=("Consolas", 10), wrap="none", height=20)
+        self.txt = tk.Text(frame, font=("Consolas", 10), wrap="none", height=20, bg=UI["surface"], fg=UI["ink"],
+                           relief="flat", borderwidth=0, padx=10, pady=8, insertbackground=UI["ink"],
+                           selectbackground=UI["accent_soft"], selectforeground=UI["ink"])
         sb = ttk.Scrollbar(frame, command=self.txt.yview)
         self.txt.configure(yscrollcommand=sb.set)
         self.txt.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
-        for tag, color in (("in", "#111827"), ("out", "#7e22ce"), ("info", "#2563eb"), ("warn", "#b91c1c"),
-                           ("reading", "#15803d"), ("dim", "#6b7280")):
+        for tag, color in (("in", UI["ink"]), ("out", "#6250d6"), ("info", "#256abf"), ("warn", "#d03b3b"),
+                           ("reading", "#006300"), ("dim", UI["muted"])):
             self.txt.tag_configure(tag, foreground=color)
 
     # ================================================================== connection
-    def refresh_ports(self):
-        ports = list_ports()
-        self.cb_port["values"] = ports
-        if ports and not any(p.split(" ")[0] == self.v_port.get().split(" ")[0] for p in ports):
-            prolific = [p for p in ports if "prolific" in p.lower() or "usb-to-serial" in p.lower()]
-            if prolific:
-                self.v_port.set(prolific[0])
+    def refresh_ports(self, ports: list[tuple[str, str]] | None = None):
+        """Fill the port list (called when the list opens, and by the background watcher every 2 s
+        while disconnected, so plugging the adapter in or out shows up by itself)."""
+        if self.demo:
+            return
+        if ports is None:
+            ports = list_ports()
+        self._port_map = {label: dev for dev, label in ports}
+        self.cb_port.configure(values=[label for _, label in ports])
+        if self.link.is_open:
+            return
+        devices = [dev for dev, _ in ports]
+        cur = self.v_port.get()
+        if cur not in devices:
+            usb = [dev for dev, label in ports if any(w in label.lower() for w in ADAPTER_WORDS)]
+            cur = (usb or devices or [""])[0]
+            self.v_port.set(cur)
+        if cur:
+            self.v_port_label.set(next(label for dev, label in ports if dev == cur))
+            self.lbl_port_hint.configure(text="")
+            self.btn_connect.state(["!disabled"])
+        else:
+            self.v_port_label.set("No serial adapter found")
+            self.lbl_port_hint.configure(text="Plug in the USB-serial adapter; it appears here by itself.")
+            self.btn_connect.state(["disabled"])
+
+    def _port_chosen(self, _e=None):
+        dev = self._port_map.get(self.v_port_label.get())
+        if dev:
+            self.v_port.set(dev)
+
+    def _start_port_watch(self):
+        self._ports_q: queue.SimpleQueue = queue.SimpleQueue()
+
+        def watch():
+            last = None
+            while not self._closing:
+                if not self.link.is_open:
+                    ports = list_ports()
+                    if ports != last:
+                        self._ports_q.put(ports)
+                        last = ports
+                time.sleep(2.0)
+
+        threading.Thread(target=watch, name="port-watch", daemon=True).start()
+
+    def _lock_serial(self, locked: bool):
+        for w in [self.cb_port, *self._serial_widgets]:
+            w.configure(state="disabled" if locked else "readonly")
+        if self.demo:
+            self.cb_port.configure(state="disabled")
 
     def serial_settings(self) -> g.SerialSettings:
         inv_par = {v: k for k, v in PARITY_NAMES.items()}
         inv_flow = {v: k for k, v in FLOW_NAMES.items()}
-        return g.SerialSettings(port=self.v_port.get().split(" ")[0] or "COM11", baud=int(self.v_baud.get()),
+        return g.SerialSettings(port=self.v_port.get() or "COM1", baud=int(self.v_baud.get()),
                                 bits=int(self.v_bits.get()), parity=inv_par[self.v_parity.get()],
                                 stop=int(self.v_stop.get()), flow=inv_flow[self.v_flow.get()],
                                 terminator=self.v_term.get())
@@ -594,7 +819,8 @@ class App:
             return
         self.log = g.SessionLog(self.logs, simulated=self.demo)
         self.log.write("info", b"", ser, note="connected")
-        self.btn_connect.configure(text="Disconnect")
+        self.btn_connect.configure(text="Disconnect", style="TButton")
+        self._lock_serial(True)
         self._set_status("sim" if self.demo else "open")
         self._raw(f"Connected: {ser.describe()}" + ("  [SIMULATED]" if self.demo else ""), "info")
         self.on_poll_toggle()
@@ -605,7 +831,8 @@ class App:
         self.link.close()
         if self.log:
             self.log.close()
-        self.btn_connect.configure(text="Connect")
+        self.btn_connect.configure(text="Connect", style="Accent.TButton")
+        self._lock_serial(False)
         self._set_status("off")
         self._raw("Disconnected; the port is free for other programs.", "info")
 
@@ -658,10 +885,18 @@ class App:
                 break
             n += 1
             self._handle(ev)
+        ports = None
+        while self._ports_q is not None:
+            try:
+                ports = self._ports_q.get_nowait()
+            except queue.Empty:
+                break
+        if ports is not None:
+            self.refresh_ports(ports)
         now = time.time()
         if self.t0 is not None:
             el = int(now - self.t0)
-            self.lbl_run.configure(text=f"Run time {el // 60:02d}:{el % 60:02d}  |  {len(self.readings)} readings")
+            self.lbl_run.configure(text=f"Run time {el // 60:02d}:{el % 60:02d}   ·   {len(self.readings)} readings")
         if self._dirty and now - self._last_draw > 0.35:
             self._redraw()
             self._last_draw = now
@@ -696,7 +931,8 @@ class App:
             messagebox.showwarning(APP_NAME, f"The serial port stopped working:\n\n{ev[2]}")
         elif kind == "closed":
             if self.btn_connect.cget("text") == "Disconnect":
-                self.btn_connect.configure(text="Connect")
+                self.btn_connect.configure(text="Connect", style="Accent.TButton")
+                self._lock_serial(False)
                 self._set_status("off")
 
     def _on_line(self, t: float, raw: bytes, source: str, cmd: str | None):
@@ -769,22 +1005,24 @@ class App:
 
     def _show_now(self, row):
         if row["kind"] == "C":
-            self.lbl_big.configure(text=f"{row['value']:g} {row['unit']}")
-            self.lbl_sub.configure(text="(GENESYS in concentration mode)")
+            self.lbl_big.configure(text=f"{row['value']:g}")
+            self.lbl_unit.configure(text=row["unit"])
+            self.lbl_sub.configure(text="GENESYS in concentration mode")
         else:
             a = row["A"]
             places = 4 if row["source"] == "SND" else 3      # SND answers with 4 decimals
-            self.lbl_big.configure(text=f"{a:.{places}f} A" if a is not None else "---")
+            self.lbl_big.configure(text=f"{a:.{places}f}" if a is not None else "—")
+            self.lbl_unit.configure(text="A" if a is not None else "")
             parts = [f"{row['T']:.1f} %T"] if row["T"] is not None else []
             conc, cu, _ = self._conc_of(row)
             if conc is not None:
                 parts.append(f"c = {fmt_sig(conc)} {cu}")
-            self.lbl_sub.configure(text="     ".join(parts))
+            self.lbl_sub.configure(text="   ·   ".join(parts))
         when = datetime.fromtimestamp(row["wall"]).strftime("%H:%M:%S")
-        src = "hands-free (SND)" if row["source"] == "SND" else "Print"
-        wl = f" at {row['wl']:g} nm" if row["wl"] else ""
-        sim = "  SIMULATED" if self.demo else ""
-        self.lbl_src.configure(text=f"{src}{wl}, {when}, t = {row['t']:.1f} s{sim}")
+        src = "Hands-free (SND)" if row["source"] == "SND" else "Print"
+        wl = f" · {row['wl']:g} nm" if row["wl"] else ""
+        sim = " · SIMULATED" if self.demo else ""
+        self.lbl_src.configure(text=f"{src}{wl} · {when} · t = {row['t']:.1f} s{sim}")
 
     def _sample_changed(self):
         for k, v in (("wl", self.v_wl), ("path", self.v_path), ("species", self.v_species), ("eps", self.v_eps),
@@ -810,7 +1048,8 @@ class App:
         self.last = None
         self.t0 = time.time()
         self.csv_path = None
-        self.lbl_big.configure(text="---")
+        self.lbl_big.configure(text="—")
+        self.lbl_unit.configure(text="")
         self.lbl_sub.configure(text="")
         self.lbl_src.configure(text="New run started: t = 0 now")
         self._dirty.update({"live", "kin"})
@@ -1035,31 +1274,39 @@ class App:
         if which == "Concentration" and not rows and self.readings:
             note = ("Enter ε (or pick the calibration curve) under Sample to see concentrations."
                     if self.v_method.get() == "beer" else "Add calibration standards first.")
+        title = f"{ylab.split(' (')[0]} over time"
         if rows:
             t, tu = self._times(rows)
             src = np.array([r["source"] for r in rows])
             y = np.array(y, dtype=float)
-            ax.plot(t, y, "-", color="#94a3b8", lw=1, zorder=1)
-            for s_name, style in (("SND", dict(marker="o", ms=4, color="#2563eb", label="hands-free (SND)")),
-                                  ("Print", dict(marker="D", ms=6, color="#ea580c", label="Print"))):
+            ax.plot(t, y, "-", color=UI["axis"], lw=1.5, zorder=1)          # neutral guide through all points
+            kinds = [k for k in ("SND", "Print") if (src == k).any()]
+            for s_name, color, marker, label in (("SND", SERIES["snd"], "o", "Hands-free (SND)"),
+                                                 ("Print", SERIES["print"], "D", "Print")):
                 m = src == s_name
                 if m.any():
-                    ax.plot(t[m], y[m], ls="none", zorder=2, **style)
-            ax.legend(loc="best", fontsize=8)
+                    ax.plot(t[m], y[m], ls="none", marker=marker, color=color, label=label, zorder=3, **MARK)
+            if len(kinds) > 1:
+                ax.legend(loc="best")
+            else:
+                title += "  ·  " + ("hands-free (SND)" if kinds[0] == "SND" else "Print")
+            places = 4 if which == "Absorbance" else 2
+            ax.annotate(f"{y[-1]:.{places}f}" if which != "Concentration" else fmt_sig(y[-1]),
+                        (t[-1], y[-1]), textcoords="offset points", xytext=(8, 0), va="center",
+                        fontsize=9, color=UI["ink"], fontweight="semibold")
+            ax.margins(x=0.06)
         else:
             tu = self.v_xunit.get()
         for tm, lab in self.marks:
             x = tm / 60 if tu == "min" else tm
-            ax.axvline(x, color="#7e22ce", ls="--", lw=1)
+            ax.axvline(x, color=UI["muted"], lw=1, zorder=0)
             ax.annotate(lab, (x, 1), xycoords=("data", "axes fraction"), rotation=90, va="top", ha="right",
-                        fontsize=8, color="#7e22ce")
+                        fontsize=8, color=UI["ink2"], xytext=(-3, -4), textcoords="offset points")
         ax.set_xlabel(f"Time ({tu})")
         ax.set_ylabel(ylab)
-        title = "Readings"
-        if not self.demo and self.readings and not self.s.get("format_verified"):
-            title += "  (format not yet checked against the display)"
-        ax.set_title(title, fontsize=10)
-        ax.grid(alpha=0.3)
+        ax.set_title(title)
+        if not note and not self.demo and self.readings and not self.s.get("format_verified"):
+            note = "Readings not yet checked against the display (Raw data tab)."
         self.lbl_live_note.configure(text=note)
         self.live_canvas.draw_idle()
 
@@ -1076,7 +1323,7 @@ class App:
         self.s["kin_from"], self.s["kin_to"] = self.v_kfrom.get(), self.v_kto.get()
         for ax in self.kin_axes:
             ax.clear()
-            ax.grid(alpha=0.3)
+            ax.set_facecolor(UI["surface"])
         self.tv_kin.delete(*self.tv_kin.get_children())
         rows = self._kin_window()
         self.kin = None
@@ -1102,6 +1349,7 @@ class App:
         if self.kin:
             k = self.kin
             names = {0: "Zero order  [R] vs t", 1: "First order  ln[R] vs t", 2: "Second order  1/[R] vs t"}
+            short = {0: "Zero order · [R]", 1: "First order · ln[R]", 2: "Second order · 1/[R]"}
             ylabs = {0: f"[R] ({k.unit})", 1: f"ln [R]", 2: f"1/[R] ({k.unit}⁻¹)"}
             for o in (0, 1, 2):
                 f = k.fits[o]
@@ -1110,15 +1358,17 @@ class App:
                     f.k_units, "-" if f.r2 is None else f"{f.r2:.5f}",
                     "-" if f.half_life_s is None else f"{fmt_sig(f.half_life_s)} s", fmt_sig(f.x0), f.used))
                 ax = self.kin_axes[o]
+                if o == k.best:
+                    ax.set_facecolor(UI["accent_soft"])            # the best straight line gets a tint
                 tt, yy = k.transformed(o)
-                ax.plot(tt, yy, "o", ms=3, color="#2563eb")
+                ax.plot(tt, yy, "o", color=SERIES["snd"], zorder=3, **dict(MARK, ms=5.5))
                 if f.fit is not None:
                     xs = np.array([tt.min(), tt.max()])
-                    ax.plot(xs, f.fit.y(xs), "-", color="#dc2626", lw=1.5)
-                    ax.set_title(f"{names[o]}\nR² = {f.r2:.4f}", fontsize=9,
-                                 fontweight="bold" if o == k.best else "normal")
+                    ax.plot(xs, f.fit.y(xs), "-", color=SERIES["fit"], lw=2, zorder=2)
+                    best = "   ·   best fit" if o == k.best else ""
+                    ax.set_title(f"{short[o]}\nR² = {f.r2:.4f}{best}", fontsize=9.5)
                 else:
-                    ax.set_title(names[o], fontsize=9)
+                    ax.set_title(short[o], fontsize=9.5)
                 ax.set_xlabel("t (s)")
                 ax.set_ylabel(ylabs[o])
             rate = k.initial_rate
@@ -1138,47 +1388,49 @@ class App:
     def _draw_cal(self):
         ax = self.cal_ax
         ax.clear()
-        ax.grid(alpha=0.3)
         pts = self.s.get("standards", [])
         u = self.v_cal_unit.get()
         if pts:
             c = np.array([p[0] for p in pts])
             a = np.array([p[1] for p in pts])
-            ax.plot(c, a, "o", color="#2563eb", label="standards")
             if self.cal:
                 xs = np.linspace(min(0, c.min()), c.max() * 1.05, 50)
-                ax.plot(xs, self.cal.fit.y(xs), "-", color="#dc2626", lw=1.5,
-                        label=f"fit, R² = {self.cal.fit.r2:.4f}")
-                if self.last and self.last["A"] is not None:
-                    ca = self.cal.conc(self.last["A"])
-                    ax.plot([ca], [self.last["A"]], "*", ms=14, color="#ea580c",
-                            label=f"latest reading → {fmt_sig(ca)} {u}")
-            ax.legend(loc="best", fontsize=8)
+                ax.plot(xs, self.cal.fit.y(xs), "-", color=SERIES["fit"], lw=2, zorder=2,
+                        label=f"Fit · R² = {self.cal.fit.r2:.4f}")
+            ax.plot(c, a, "o", color=SERIES["snd"], label="Standards", zorder=3, **MARK)
+            if self.cal and self.last and self.last["A"] is not None:
+                ca = self.cal.conc(self.last["A"])
+                ax.plot([ca], [self.last["A"]], "D", color=SERIES["sample"], label="Latest reading", zorder=4,
+                        **dict(MARK, ms=8))
+                ax.annotate(f"{fmt_sig(ca)} {u}", (ca, self.last["A"]), textcoords="offset points",
+                            xytext=(10, -4), fontsize=9, color=UI["ink"], fontweight="semibold")
+            ax.legend(loc="upper left")
         ax.set_xlabel(f"Concentration ({u})")
         ax.set_ylabel("Absorbance (A)")
-        ax.set_title("Calibration curve (Beer-Lambert check)", fontsize=10)
+        ax.set_title("Calibration curve")
         self.cal_canvas.draw_idle()
 
     def _draw_spec(self):
         ax = self.spec_ax
         ax.clear()
-        ax.grid(alpha=0.3)
         pts = self.s.get("spectrum", [])
         if pts:
             wl = np.array([p[0] for p in pts])
             a = np.array([p[1] for p in pts])
-            ax.plot(wl, a, "o-", color="#2563eb", ms=4)
             lm = an.lambda_max(wl, a)
             if lm:
-                ax.axvline(lm[0], color="#dc2626", ls="--", lw=1)
-                ax.annotate(f"λmax ≈ {lm[0]:.0f} nm", (lm[0], lm[1]), textcoords="offset points",
-                            xytext=(6, 6), fontsize=9, color="#dc2626")
-                self.lbl_spec.configure(text=f"λmax ≈ {lm[0]:.0f} nm  (A = {lm[1]:.3f})")
+                ax.axvline(lm[0], color=UI["ink2"], lw=1, zorder=1)
+                ax.annotate(f"λmax ≈ {lm[0]:.0f} nm", (lm[0], 1), xycoords=("data", "axes fraction"),
+                            textcoords="offset points", xytext=(6, -12), fontsize=9, color=UI["ink"],
+                            fontweight="semibold")
+                self.lbl_spec.configure(text=f"λmax ≈ {lm[0]:.0f} nm   ·   A = {lm[1]:.3f}")
+            ax.plot(wl, a, "-", color=SERIES["snd"], lw=2, zorder=2)
+            ax.plot(wl, a, "o", color=SERIES["snd"], zorder=3, **MARK)
         else:
             self.lbl_spec.configure(text="")
         ax.set_xlabel("Wavelength (nm)")
         ax.set_ylabel("Absorbance (A)")
-        ax.set_title("Absorption spectrum, point by point", fontsize=10)
+        ax.set_title("Absorption spectrum, point by point")
         self.spec_canvas.draw_idle()
 
     # ================================================================== status / misc
@@ -1186,8 +1438,8 @@ class App:
         if self.demo and state != "off":
             state = "sim"
         self._state = state
-        text, color = STATUS_STYLE[state]
-        self.lbl_status.configure(text=text, bg=color)
+        text, bg, fg = STATUS_STYLE[state]
+        self.lbl_status.configure(text=f"●  {text}", bg=bg, fg=fg)
         self._status_text()
 
     def _status_text(self):

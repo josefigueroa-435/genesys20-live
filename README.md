@@ -11,8 +11,10 @@ dye) so you can try every tab without hardware; everything it shows is labelled 
 
 1. Cable: the GENESYS is a DCE device, so use a **straight-through** DE-9 cable (here through the
    Prolific USB-to-serial adapter, usually COM11).
-2. On the GENESYS: **Utility > RS232**. Note baud, data bits, parity, handshake and terminator, and set
-   the same in the app's top bar (the manual's values are 9600, 8, none, 1 stop).
+2. On the GENESYS: **Utility > RS232**. Note baud, data bits, parity, handshake and terminator. In the
+   app's **Connection** card, click **Edit** next to Serial settings and set the same (the manual's
+   values are 9600, 8, none, 1 stop). The port list finds USB serial adapters by itself, every 2 s,
+   and hides Bluetooth serial links.
 3. **Utility > Printer setup > Serial**. Optionally Print WL = Yes and Print Units = Yes, so each printout
    carries its wavelength and unit.
 4. Click **Connect**. First test, no commands sent: on the GENESYS go to Utility > RS232 and press
