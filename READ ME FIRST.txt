@@ -1,0 +1,63 @@
+GENESYS 20 Live - READ ME FIRST
+===============================
+
+Live readings, automatic wavelength scans, kinetics and calibration curves for the
+Thermo Scientific GENESYS 20 spectrophotometer, on a Windows PC over its RS-232 port.
+The full guide with pictures is "GENESYS 20 Live - Guide.pdf" in this folder.
+
+
+1. INSTALL (once per computer, about 5 minutes)
+
+   a) Install Python 3.10 or newer from https://www.python.org/downloads/
+      (tick "Add python.exe to PATH" in the installer).
+   b) Double-click  Install requirements.bat   (needs internet).
+   c) Double-click  Make desktop shortcut.bat  and start the app from the desktop icon.
+
+   No instrument handy? Run  GENESYS 20 Live (demo).bat  - a simulated GENESYS 20.
+   Everything in the demo is labelled SIMULATED.
+
+
+2. CABLE (the step that trips everyone up)
+
+   The GENESYS 20's RS232 port is the 9-pin MALE socket labelled RS232 on the back
+   (not the 25-pin PRINTER port). It is wired as DCE, so:
+
+   - USB adapter with a MALE 9-pin end   -> straight-through female-female cable
+                                            or gender changer (Thermo part 336042)
+   - USB adapter with a FEMALE 9-pin end -> usually a male-to-female NULL-MODEM adapter
+     (e.g. DTECH)                           in between (this lab's DTECH needs one)
+
+   If nothing ever arrives, it is almost always the cable crossing. See the guide,
+   section 9 (Troubleshooting), and the loopback test in the tools folder.
+
+
+3. SETTINGS ON THE GENESYS
+
+   Utility > RS232          9600 baud, 8 data bits, parity Off, handshake Off, terminator CR/LF
+   Utility > Printer setup  Serial, Print WL = Yes   (only needed for the Print key)
+
+
+4. FIRST TEST IN THE APP
+
+   - The Connection card finds the USB-serial adapter by itself. Click Connect.
+   - Click Identify: the Raw data tab should show "GENESYS 20" and its revision.
+   - Tick "Ask for a reading every 2 s": readings appear and are plotted live.
+   - Keep the wavelength box (Sample card) equal to the wavelength set on the GENESYS.
+
+
+5. WHAT THE APP SENDS TO THE INSTRUMENT
+
+   Only MODEL, REV, SND (read the absorbance) and GTO <nm> (go to a wavelength, used
+   by automatic scans). Nothing else is ever sent, so settings, calibration and
+   alignment cannot be changed by this app.
+
+
+6. FILES
+
+   logs\        every byte from the instrument and every reading, saved as they arrive
+   data\runs\   runs you save (report.html, CSVs, charts) - point "Data folder" in the
+                Runs tab at a OneDrive/shared folder to share runs, presets and curves
+   settings.json  this computer's settings
+
+   Updates: when a new version is published, a blue bar offers "Update now".
+   Your settings, logs and data are never touched by an update.

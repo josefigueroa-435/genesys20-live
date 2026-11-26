@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GENESYS 20 Live - User Guide</title>
+<style>
+  @page { size: Letter; margin: 16mm 15mm 16mm 15mm; }
+  :root { --ink:#0b0b0b; --ink2:#52514e; --muted:#898781; --line:#e1e0d9; --soft:#f0efec; --accent:#2a78d6; --warn:#b45309; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", system-ui, sans-serif; color: var(--ink); font-size: 10.5pt; line-height: 1.45; margin: 0; }
+  h1 { font-size: 24pt; margin: 0 0 4px; }
+  h2 { font-size: 14.5pt; margin: 22px 0 8px; padding-bottom: 4px; border-bottom: 2px solid var(--accent); break-after: avoid; }
+  h3 { font-size: 11.5pt; margin: 14px 0 4px; break-after: avoid; }
+  p { margin: 0 0 7px; }
+  ul, ol { margin: 0 0 8px 0; padding-left: 20px; }
+  li { margin: 2px 0; }
+  code, .k { font-family: Consolas, monospace; font-size: 9.5pt; background: var(--soft); padding: 0 4px; border-radius: 3px; }
+  .cover { background: #1a1a19; color: #f0efec; border-radius: 10px; padding: 22px 24px; margin-bottom: 14px; }
+  .cover p { color: #c3c2b7; margin: 6px 0 0; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; break-inside: avoid; }
+  .card h3 { margin-top: 0; }
+  .note { border-left: 4px solid var(--accent); background: #eef4fc; padding: 8px 12px; border-radius: 4px; margin: 8px 0; break-inside: avoid; }
+  .warn { border-left: 4px solid var(--warn); background: #fdf3e3; padding: 8px 12px; border-radius: 4px; margin: 8px 0; break-inside: avoid; }
+  table { border-collapse: collapse; width: 100%; margin: 6px 0 10px; font-size: 9.8pt; break-inside: avoid; }
+  th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 4px 7px; vertical-align: top; }
+  th { background: var(--soft); color: var(--ink2); font-weight: 600; }
+  figure { margin: 8px 0 12px; break-inside: avoid; }
+  figure img { width: 82%; border: 1px solid var(--line); border-radius: 6px; }
+  figcaption { color: var(--muted); font-size: 9pt; margin-top: 3px; }
+  .small { color: var(--ink2); font-size: 9.5pt; }
+  .pb { break-before: page; }
+  .steps li { margin: 4px 0; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <h1>GENESYS 20 Live</h1>
+  <p>Live readings, automatic wavelength scans, kinetics and calibration curves for the Thermo Scientific
+  GENESYS 20 spectrophotometer, on a Windows PC over its RS-232 port. Version 0.5.</p>
+</div>
+
+<div class="grid">
+  <div class="card"><h3>What it does</h3>
+    <ul>
+      <li>Hands-free absorbance readings every few seconds, plotted live</li>
+      <li>Concentrations from ε (Beer–Lambert) or your own calibration curve</li>
+      <li>Kinetics: zero, first and second-order fits with k, R² and half-life</li>
+      <li>Automatic wavelength scans with blank correction, repeated on a timer</li>
+      <li>Saved runs with a one-page report to email or print</li>
+      <li>Updates itself when a new version is published</li>
+    </ul></div>
+  <div class="card"><h3>What you need</h3>
+    <ul>
+      <li>Windows 10 or 11 with Python 3.10 or newer (python.org, tick <i>Add python.exe to PATH</i>)</li>
+      <li>A USB-to-RS-232 adapter, plus the right cable or adapter for the GENESYS (section 2)</li>
+      <li>Internet once, to install the Python packages</li>
+      <li>The GENESYS 20 itself (or none: the demo simulates one)</li>
+    </ul></div>
+</div>
+
+<h2>1. Install (about 5 minutes)</h2>
+<ol class="steps">
+  <li>Unzip the package anywhere you can write to, e.g. <code>Documents\GENESYS 20 Live</code>.</li>
+  <li>Double-click <b>Install requirements.bat</b> (installs pyserial, numpy, matplotlib).</li>
+  <li>Double-click <b>Make desktop shortcut.bat</b>, then start the app from the new desktop icon.</li>
+  <li>To try it without the instrument, run <b>GENESYS 20 Live (demo).bat</b>. Everything in the demo is
+      labelled SIMULATED.</li>
+</ol>
+
+<h2>2. Connect the GENESYS 20</h2>
+<h3>The cable: the one thing that trips everyone up</h3>
+<p>The GENESYS 20's RS232 port (the 9-pin <b>male</b> socket labelled RS232 on the back, not the 25-pin PRINTER
+port) is wired as <b>DCE</b>: it transmits on pin 2. Whatever sits between it and the PC must cross over to a
+normal PC-style connection:</p>
+<table>
+  <tr><th>Your USB-serial adapter</th><th>What goes between adapter and GENESYS</th></tr>
+  <tr><td>Standard adapter with a <b>male</b> 9-pin end</td><td>A <b>straight-through female-to-female</b> cable or
+      gender changer (Thermo part 336042)</td></tr>
+  <tr><td>Adapter with a <b>female</b> 9-pin end (e.g. DTECH)</td><td>Usually a <b>male-to-female null-modem
+      adapter</b>. This lab's DTECH adapter needs one; pin 9 doesn't matter.</td></tr>
+</table>
+<div class="note">Total silence (no bytes either way) almost always means the wrong cable crossing. The
+<code>tools</code> folder has a loopback test that tells a dead adapter from a crossed cable (section 9).</div>
+
+<h3>Settings on the GENESYS</h3>
+<table>
+  <tr><th>Menu</th><th>Set to</th></tr>
+  <tr><td>Utility → RS232</td><td>Baud 9600 · Data bits 8 · Parity Off · Handshake Off · Terminator CR/LF</td></tr>
+  <tr><td>Utility → Printer setup</td><td>Serial; Print WL = Yes; Print Units = Yes (only needed for the Print key)</td></tr>
+</table>
+
+<h3>In the app</h3>
+<ol class="steps">
+  <li>The <b>Connection</b> card finds the USB-serial adapter by itself (Bluetooth ports are hidden). The COM
+      number changes if you use a different USB socket.</li>
+  <li>Click <b>Connect</b>. The header pill turns yellow: <i>Connected · waiting for a reading</i>.</li>
+  <li>Click <b>Identify</b> (Hands-free card). The Raw data tab should show <code>GENESYS 20</code> and its
+      revision. If it doesn't, see Troubleshooting.</li>
+  <li>Serial settings (Connection card → <b>Edit</b>) must match Utility → RS232. They lock while connected.</li>
+</ol>
+
+<h2>3. Taking readings</h2>
+<ul>
+  <li><b>Hands-free:</b> tick <i>Ask for a reading every N s</i>. The app sends <code>SND</code> and gets the
+      absorbance to 4 decimals. Nothing on the instrument changes.</li>
+  <li><b>Print key:</b> with Printer setup = Serial, every press of Print lands in the app with its wavelength
+      (e.g. <code>530nm 1.351 A</code>).</li>
+  <li><b>Reading now</b> shows the latest value, %T and concentration. The <b>Live</b> tab plots A, %T or
+      concentration against time.</li>
+  <li><b>New run (t = 0 now)</b> at the moment you mix. <b>Mark event…</b> labels additions on the graph.</li>
+  <li>Once per setup, compare one reading with the GENESYS display and click <b>Yes, it matches</b> (Raw data tab).
+      The pill turns green.</li>
+  <li>The GENESYS 20 can't report its wavelength over the cable. Keep the <b>wavelength box</b> in the Sample
+      card equal to the instrument.</li>
+</ul>
+<div class="warn"><b>Out-of-range readings.</b> The GENESYS 20 reads −0.1 to 2.5 A. Outside that, it answers the
+number followed by <code>ER</code> (the same condition that makes its display flash). Hands-free readings show such
+values but don't record them; scans keep them and mark them as hollow points. Dilute samples above 2.5 A.</div>
+<figure><img src="img/live.png" alt="Live absorbance over time"><figcaption>Live tab: hands-free readings of a
+fading dye (demo).</figcaption></figure>
+
+<h2>4. Sample settings and presets</h2>
+<p>The <b>Sample</b> card holds what you know about the solution: wavelength, path length b, molar absorptivity ε,
+molar mass (for mg/L) and the unit to display. Concentrations follow <code>c = A / (ε·b)</code>, or come from
+your calibration curve.</p>
+<ul>
+  <li><b>Presets</b> fill these in. Reference presets show their source under the list: NADH (340 nm),
+      p-nitrophenolate (405 nm), ferroin (508 nm), crystal violet (590 nm; published values disagree, so calibrate),
+      and six FD&amp;C food dyes using the official JECFA/FDA absorptivities.</li>
+  <li><b>Method presets</b> (Bradford 595 nm, BCA 562 nm, permanganate 525 nm) only set the wavelength and switch
+      to "My calibration curve": those methods need standards.</li>
+  <li><b>Save…</b> stores your own presets (★) in the data folder.</li>
+</ul>
+
+<h2>5. Kinetics</h2>
+<p>Say whether the <b>reactant</b> absorbs (colour fades) or the <b>product</b> does (colour grows). Give the final
+absorbance A∞ if it isn't zero, or ε and c₀ when the product absorbs. The Kinetics tab plots [R], ln[R] and 1/[R]
+against time, fits all three, and highlights the best straight line. Use the time window to fit part of a run.
+R² from different transforms is a guide; also look for curvature.</p>
+<figure><img src="img/kinetics.png" alt="Kinetics fits"><figcaption>First-order fade picked as the best fit,
+k = 0.020 s⁻¹ (demo).</figcaption></figure>
+
+<h2>6. Calibration curves</h2>
+<ol class="steps">
+  <li>Zero the GENESYS with the blank (0 ABS/100%T).</li>
+  <li>For each standard: put it in, take a reading, type its concentration, click <b>Add the current reading as
+      this standard</b>.</li>
+  <li>The fit shows slope, intercept, R², LOD (3.3·s/slope), LOQ (10·s/slope) and ε = slope/b.</li>
+  <li>Choose <b>My calibration curve</b> in the Sample card to turn readings into concentrations.</li>
+  <li><b>Saved curves</b>: save a curve with a name and load it another day (same wavelength).</li>
+</ol>
+<figure><img src="img/calibration.png" alt="Calibration curve" style="width:58%"><figcaption>Four standards and
+an unknown read off the line (demo).</figcaption></figure>
+
+<h2>7. Wavelength scans (Scan tab)</h2>
+<p>Set <b>From / To / Step</b>, how many <b>Scans</b> and how often (<b>Every</b>, minutes). Example: 400–700 nm,
+10 nm steps, 3 scans every 5 min to watch a spectrum change.</p>
+<ul>
+  <li><b>Automatic</b> (default): the GENESYS moves itself with <code>GTO &lt;nm&gt;</code>, the command Thermo's
+      VISIONlite software uses for the GENESYS 20. It waits <b>Settle</b> seconds (1.5 s works) and reads.
+      Afterwards it returns to the wavelength in the Sample card.</li>
+  <li><b>Blank pass first</b> (recommended): the instrument is single-beam, so the blank is read at every
+      wavelength first and subtracted from each scan. The app pauses so you can put the sample in, then click
+      <b>Continue</b>.</li>
+  <li><b>Guided</b> (fallback): the app shows the next wavelength; set it with the nm keys and press Print. The
+      printed wavelength is checked.</li>
+  <li>Results: blank-corrected overlay (older scans lighter), λmax per scan, <b>Export CSV</b>.</li>
+</ul>
+<div class="note">Tested on this lab's GENESYS 20: 480–600 nm in 20 nm steps with a blank pass takes about 40 s.
+Reading the same blank twice gives a corrected spectrum within ±0.0007 A of zero. Away from the zeroing wavelength
+the blank alone can read below −0.1 A; those points are flagged but kept, because the subtraction needs them.</div>
+<figure><img src="img/scan.png" alt="Wavelength scans"><figcaption>Three blank-corrected scans of a fading dye,
+λmax ≈ 589 nm (demo).</figcaption></figure>
+
+<h2>8. Saving and sharing runs</h2>
+<ul>
+  <li><b>Save run…</b> (Run card or Runs tab) writes a folder with <code>report.html</code> (one page with every chart),
+      <code>readings.csv</code>, <code>scan.csv</code>, chart images and <code>run.json</code>.</li>
+  <li><b>Runs</b> tab: <b>Open report</b>, <b>Share (zip)</b>, <b>Copy summary</b> (paste into an email),
+      <b>Load into app</b> to reopen, <b>Delete</b> (moves it to <code>runs\_deleted</code>).</li>
+  <li><b>Data folder → Change…</b>: point it at a OneDrive or shared folder, and everyone sees the same runs,
+      presets and calibration curves.</li>
+  <li>Every byte from the instrument is also logged in <code>logs\raw-*.jsonl</code>, and every reading in
+      <code>logs\readings-*.csv</code>, as it arrives.</li>
+</ul>
+
+<h2>9. Troubleshooting</h2>
+<table>
+  <tr><th>Symptom</th><th>Fix</th></tr>
+  <tr><td>"Could not open COMx … Access is denied"</td><td>Another program (or a second copy of the app) has the
+      port. Close it, or click Disconnect there.</td></tr>
+  <tr><td>Connected, but nothing arrives and Identify gets no answer</td><td>Usually the cable crossing (section 2).
+      Check Utility → RS232 matches. Run <code>py tools\loopback_check.py COMx 9600 300</code> and bridge pins 2–3 of the
+      adapter: echoes mean the adapter works.</td></tr>
+  <tr><td>Adapter shows "Code 10" in Device Manager</td><td>Unplug it, wait 5 s, plug it into another USB socket.
+      Then pick the new COM number.</td></tr>
+  <tr><td>Raw data shows <code>ER</code> after a reading</td><td>The reading is outside −0.1 to 2.5 A. Dilute, or check
+      the blank and wavelength.</td></tr>
+  <tr><td>Concentration column empty</td><td>Enter ε (or choose the calibration curve) in the Sample card.</td></tr>
+  <tr><td>Hands-free readings switched themselves off</td><td>The GENESYS didn't answer <code>SND</code> three times:
+      check the connection, or use the Print key.</td></tr>
+</table>
+
+<h2>10. What the app sends to the instrument</h2>
+<p>The app refuses to send anything except these, so it can't change settings, calibration or alignment:</p>
+<table>
+  <tr><th>Command</th><th>Meaning</th><th>Sent when</th></tr>
+  <tr><td><code>MODEL</code>, <code>REV</code></td><td>Model and firmware revision</td><td>Identify</td></tr>
+  <tr><td><code>SND</code></td><td>Send the current absorbance</td><td>Hands-free readings, scans, Ask once</td></tr>
+  <tr><td><code>GTO &lt;325–1100&gt;</code></td><td>Go to a whole-nm wavelength</td><td>Automatic scans only</td></tr>
+</table>
+<p class="small">Each command is echoed by the instrument, then answered, then closed with <code>OK</code> (or
+<code>ER</code>). The GENESYS 20 echoes characters as they arrive, so the app sends one command at a time. Other
+commands found in Thermo's driver (ZER, TRN, CCM, ECH) are deliberately not used. GENESYS 2/5 commands
+(WAVELENGTH, DATA, SCAN) are refused by the GENESYS 20 with ER.</p>
+
+<h2>11. Updates</h2>
+<p>When a newer version is published, a blue bar offers <b>Update now</b>. Only changed files are downloaded, each
+one is checked, and the old files are kept in <code>.update_backup</code>. Your settings, logs and data folder are
+never touched. Click the version number in the header to check by hand.</p>
+
+</body>
+</html>

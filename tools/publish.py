@@ -66,8 +66,10 @@ def main() -> None:
     if r.returncode != 0:
         raise SystemExit("Tests failed; nothing was published.\n" + r.stderr[-3000:])
 
-    print("2/6 version.py ->", a.version)
+    print("2/6 version.py ->", a.version, "+ guide PDF")
     shipping.write_version(a.version)
+    import tempfile
+    shipping.render_guide(Path(tempfile.mkdtemp(prefix="g20_pub_")))
     print("3/6 personal-data check")
     git("add", "-A")
     shipping.check_no_personal_data(SRC, git("ls-files").splitlines())   # the whole repo is public
