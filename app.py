@@ -98,8 +98,7 @@ APP_NAME = "GENESYS 20 Live"
 # sequential blue ramp (dataviz reference, steps 250 -> 700) for repeated scans: older = lighter
 SCAN_RAMP = ["#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95",
              "#104281", "#0d366b"]
-SCAN_MODES = {"guided": "Guided: you set λ, press Print", "sim": "Simulator: fully automatic",
-              "command": "Automatic: serial set-λ command"}
+SCAN_MODES = {"command": "Automatic: GENESYS moves itself (GTO)", "guided": "Guided: you set λ, press Print"}
 
 DEFAULTS = {
     "serial": g.SerialSettings().to_dict(),
@@ -129,8 +128,9 @@ DEFAULTS = {
     "data_dir": "",          # runs, saved presets and calibration curves; a OneDrive folder shares them
     "preset": "",
     "scan": {"start": 400, "stop": 700, "step": 10, "blank_first": True, "repeats": 1, "interval_min": 0,
-             "settle_s": 3, "mode": "guided"},
-    "wl_command": "",        # set-wavelength command template from Thermo's RS232 command set ("" = off)
+             "settle_s": 1.5, "mode": "command"},
+    # go-to-wavelength command: from Thermo's VISIONlite GENESYS 20 driver, verified on the instrument
+    "wl_command": "GTO {wl}",
 }
 
 DEMO_SAMPLE = {"wl": "590", "eps": "87000", "unit": "µM", "species": "reactant", "a_inf": "0.004",
@@ -236,7 +236,11 @@ class App:
             for k, v in DEMO_SAMPLE.items():
                 if not self.s.get(k):
                     self.s[k] = v
-            self.s["scan"] = dict(self.s["scan"], mode="sim")
+            self.s["scan"] = dict(self.s["scan"], mode="command")
+        if not self.s.get("wl_command"):
+            self.s["wl_command"] = DEFAULTS["wl_command"]
+        if (self.s.get("scan") or {}).get("mode") not in SCAN_MODES:      # older settings ("sim")
+            self.s["scan"] = dict(self.s.get("scan") or {}, mode="command")
         self.logs = logs_dir or os.path.join(HERE, "logs")
         self.data_dir = data_dir or self.s.get("data_dir") or os.path.join(HERE, "data")
         self.user_presets = presets.Store(os.path.join(self.data_dir, "presets.json"))
@@ -247,6 +251,7 @@ class App:
         self._scan_set_wl: float | None = None
         self._scan_poll_restore = False
         self._scan_passes_seen = 0
+        self._scan_retries = 0
         self._viewing: str | None = None          # name of a saved run loaded for viewing
         self._ui_calls: queue.SimpleQueue = queue.SimpleQueue()
         self._update_manifest: dict | None = None
@@ -797,14 +802,13 @@ class App:
         ttk.Checkbutton(left, text="Blank pass first (single-beam correction)",
                         variable=self.v_sc_blank).pack(anchor="w", pady=(8, 2))
         ttk.Label(left, text="How the wavelength is set", style="Head.TLabel").pack(anchor="w", pady=(6, 2))
-        modes = ["guided", "sim"] if self.demo else ["guided", "command"]
-        self.v_sc_mode = tk.StringVar(value=SCAN_MODES[sc["mode"] if sc["mode"] in modes else "guided"])
+        modes = list(SCAN_MODES)
+        self.v_sc_mode = tk.StringVar(value=SCAN_MODES[sc["mode"] if sc["mode"] in modes else "command"])
         self.cb_sc_mode = ttk.Combobox(left, textvariable=self.v_sc_mode, state="readonly",
                                        values=[SCAN_MODES[m] for m in modes])
         self.cb_sc_mode.pack(fill="x")
-        if not self.demo:
-            ttk.Button(left, text="Set-wavelength command...", style="Link.TButton",
-                       command=self.configure_wl_command).pack(anchor="w", pady=(2, 0))
+        ttk.Button(left, text="Set-wavelength command...", style="Link.TButton",
+                   command=self.configure_wl_command).pack(anchor="w", pady=(2, 0))
         row = ttk.Frame(left)
         row.pack(fill="x", pady=(10, 0))
         self.btn_scan = ttk.Button(row, text="Start scan", style="Accent.TButton", command=self.start_scan)
@@ -834,9 +838,10 @@ class App:
             self.tv_scan.heading(c, text=t)
             self.tv_scan.column(c, width=w, anchor="center")
         self.tv_scan.pack(fill="x", pady=(10, 0))
-        ttk.Label(left, text="Guided: after each prompt, set that wavelength with the nm keys and press Print "
-                             "(Print WL = Yes); the printed λ is checked. The GENESYS 20 has no public "
-                             "set-wavelength command yet, so it can't move by itself.",
+        ttk.Label(left, text="Automatic: the GENESYS moves itself with GTO (the command Thermo's VISIONlite "
+                             "uses for the GENESYS 20), waits Settle seconds, then reads; a reading taken "
+                             "too early is refused by the instrument and repeated. Guided: you set each "
+                             "wavelength and press Print.",
                   style="Hint.TLabel", wraplength=320).pack(fill="x", pady=(8, 0))
         holder = ttk.Frame(tab)
         holder.pack(side="left", fill="both", expand=True)
@@ -1114,9 +1119,16 @@ class App:
                     self._raw("Turned hands-free readings off: the GENESYS didn't answer SND three times. "
                               "Check baud/parity/handshake/line end against Utility > RS232 on the "
                               "instrument, or use Print.", "warn")
+        elif kind == "done":
+            self._scan_event("done", ev[2])
         elif kind == "refused":
             cmd = ev[2]
-            self._raw(f"The GENESYS refused {cmd} (answered ER: not supported).", "warn", ev[1])
+            if cmd == "SND" and len(ev) > 4 and ev[4] and self._out_of_range(ev[1], ev[4]):
+                return
+            if self._scan_event("refused", cmd):
+                self._raw(f"{cmd}: no reading (ER), asking again.", "dim", ev[1])
+                return
+            self._raw(f"The GENESYS answered {cmd} with {ev[3] if len(ev) > 3 else 'ER'}.", "warn", ev[1])
             if self.scan and self.scan.state == "running" and self._scan_mode() == "command" \
                     and cmd not in g.READ_ONLY_COMMANDS:
                 self.stop_scan()
@@ -1547,11 +1559,11 @@ class App:
         cur = self.s.get("wl_command", "")
         text = simpledialog.askstring(
             APP_NAME,
-            "Set-wavelength command from Thermo's GENESYS 20 RS232 command set, with {wl} where the "
-            "wavelength goes (example shape only: CMD {wl}).\n\nOnly enter a command from Thermo's "
-            "documentation: this port also accepts calibration-table uploads, so a guessed command could "
-            "change the instrument. Leave empty to switch automatic scans off.",
-            initialvalue=cur, parent=self.root)
+            "Go-to-wavelength command, with {wl} where the wavelength goes.\n\nThe GENESYS 20 uses "
+            "GTO {wl} (from Thermo's VISIONlite GENESYS 20 driver, checked on this instrument). Only change "
+            "it for a different instrument and only to a documented command: this port also accepts "
+            "calibration-table uploads. Leave empty to switch automatic scans off.",
+            initialvalue=cur or DEFAULTS["wl_command"], parent=self.root)
         if text is None:
             return
         text = text.strip()
@@ -1580,10 +1592,11 @@ class App:
             return
         if mode == "command":
             if not self.s.get("wl_command"):
-                messagebox.showinfo(APP_NAME, "Automatic scans need the set-wavelength command from Thermo's "
-                                              "RS232 command set first (Set-wavelength command...). Use Guided.")
+                messagebox.showinfo(APP_NAME, "Automatic scans are switched off (no go-to-wavelength command). "
+                                              "Set it under Set-wavelength command... (GTO {wl}), or use Guided.")
                 return
             self.link.allow_wavelength_command(self.s["wl_command"])
+        self._scan_retries = 0
         self.s["scan"] = {"start": cfg.start, "stop": cfg.stop, "step": cfg.step, "blank_first": cfg.blank_first,
                           "repeats": cfg.repeats, "interval_min": cfg.interval_s / 60, "settle_s": cfg.settle_s,
                           "mode": mode}
@@ -1610,6 +1623,13 @@ class App:
     def _scan_finished(self, text: str):
         self._scan_wait = None
         self.btn_scan.state(["!disabled"])
+        home = self._num(self.v_wl)                   # put the GENESYS back at the working wavelength
+        if self._scan_mode() == "command" and home and self.link.is_open and self.s.get("wl_command"):
+            try:
+                self.link.send(self.link.wavelength_command(home))
+                text += f" Back at {home:g} nm."
+            except ValueError:
+                pass
         if self._scan_poll_restore:
             self._scan_poll_restore = False
             self.v_poll.set(True)
@@ -1662,33 +1682,71 @@ class App:
             elif time.time() > self._scan_due:
                 self._scan_wait = None
             return
-        # automatic: simulator or the configured command
+        # automatic: GTO <nm> -> wait for OK -> settle -> SND (re-read if the GENESYS answers ER)
         now = time.time()
         if self._scan_wait is None and self._scan_set_wl != tgt:
             try:
-                if mode == "sim" and self.sim is not None:
-                    self.sim.wl = tgt
-                else:
-                    self.link.send(self.link.wavelength_command(tgt))
+                self.link.send(self.link.wavelength_command(tgt))
             except Exception as exc:
                 self.stop_scan()
                 messagebox.showerror(APP_NAME, f"Could not set the wavelength: {exc}")
                 return
             self._scan_set_wl = tgt
-            self._scan_wait = "settle"
-            self._scan_due = now + sc.cfg.settle_s
+            self._scan_retries = 0
+            self._scan_wait = "moving"                          # until the GENESYS says OK
+            self._scan_due = now + 15
             self.lbl_scan_prompt.configure(text=f"{what} · moving to {tgt:g} nm")
+        elif self._scan_wait == "moving" and now >= self._scan_due:
+            self.stop_scan()
+            messagebox.showwarning(APP_NAME, f"The GENESYS didn't confirm the move to {tgt:g} nm.")
         elif self._scan_wait == "settle" and now >= self._scan_due:
             self.send("SND")
             self._scan_wait = "read"
             self._scan_due = now + 6
+            self.lbl_scan_prompt.configure(text=f"{what} · reading at {tgt:g} nm")
         elif self._scan_wait == "read" and now >= self._scan_due:
             self._raw(f"No reading at {tgt:g} nm; asking again.", "warn")
             self._scan_wait = "settle"
             self._scan_due = now
 
-    def _scan_take(self, r: g.Reading, source: str) -> bool:
-        """Offer a reading to the running scan. True if the scan used it."""
+    def _scan_event(self, kind: str, cmd: str) -> bool:
+        """GTO acknowledged ("done") or a command refused: drive the automatic scan. True if handled."""
+        sc = self.scan
+        if sc is None or sc.state != "running" or self._scan_mode() != "command":
+            return False
+        if kind == "done" and self._scan_wait == "moving":
+            self._scan_wait = "settle"
+            self._scan_due = time.time() + sc.cfg.settle_s
+            return True
+        if kind == "refused" and cmd == "SND" and self._scan_wait == "read":
+            self._scan_retries += 1                             # a bare ER (no number): try again
+            if self._scan_retries > 3:
+                self._raw(f"No reading at {sc.target():g} nm after 3 tries; skipped.", "warn")
+                self.scan_skip()
+                return True
+            self._scan_wait = "settle"
+            self._scan_due = time.time() + max(0.7, sc.cfg.settle_s / 2)
+            return True
+        return False
+
+    def _out_of_range(self, t: float, lines: list[bytes]) -> bool:
+        """SND answered with a number and then ER: a reading outside -0.1..2.5 A. True if handled."""
+        r = next((g.parse_line(g.decode(ln), default_kind="A") for ln in lines), None)
+        if r is None or r.absorbance is None:
+            return False
+        if self.scan and self.scan.state == "running" and self._scan_wait == "read":
+            return self._scan_take(r, "SND", flagged=True)
+        self._raw(f"<- {r.value:g}  (outside the GENESYS 20's -0.1 to 2.5 A range; not recorded)", "warn", t)
+        self.lbl_big.configure(text=f"{r.value:.4f}")
+        self.lbl_unit.configure(text="A")
+        self.lbl_sub.configure(text="Outside the -0.1 to 2.5 A range")
+        self.lbl_src.configure(text=f"Hands-free (SND) · {datetime.fromtimestamp(t):%H:%M:%S} · not recorded")
+        self.snd_misses = 0                                     # the GENESYS did answer
+        return True
+
+    def _scan_take(self, r: g.Reading, source: str, flagged: bool = False) -> bool:
+        """Offer a reading to the running scan. True if the scan used it. `flagged` = the GENESYS
+        answered the reading with ER (outside its -0.1 to 2.5 A range): kept but marked."""
         sc = self.scan
         if sc is None or sc.state != "running" or self._scan_wait == "hold":
             return False
@@ -1709,9 +1767,10 @@ class App:
                 self.lbl_scan_prompt.configure(text=f"Wrong wavelength ({r.wl:g} nm). Set {tgt:g} nm, press Print.")
                 return True
         label = sc.current.label
-        sc.record(a)
+        sc.record(a, flagged=flagged)
         self._scan_wait = None
-        self._raw(f"{label} · {tgt:g} nm: A = {a:.4f}", "reading")
+        note = "  (outside the GENESYS 20's -0.1 to 2.5 A range: kept, marked)" if flagged else ""
+        self._raw(f"{label} · {tgt:g} nm: A = {a:.4f}{note}", "warn" if flagged else "reading")
         self.lbl_big.configure(text=f"{a:.4f}")
         self.lbl_unit.configure(text="A")
         self.lbl_src.configure(text=f"Scan · {tgt:g} nm · {datetime.now():%H:%M:%S}")
@@ -2029,6 +2088,7 @@ class App:
         self.tv_scan.delete(*self.tv_scan.get_children())
         sc = self.scan
         title = "Wavelength scans"
+        flagged_any = False
         if sc and sc.passes:
             samples = sc.samples()
             if sc.blank and not samples:
@@ -2048,6 +2108,12 @@ class App:
                 ax.plot([w for w, _ in ok], [v for _, v in ok], "-", color=color, lw=2, label=label, zorder=2)
                 if len(ok) <= 40:
                     ax.plot([w for w, _ in ok], [v for _, v in ok], "o", color=color, zorder=3, **dict(MARK, ms=5))
+                bad = set(p.flags) | (set(sc.blank.flags) if sc.blank else set())
+                fl = [(w, v) for w, v in ok if w in bad]
+                if fl:                                          # flagged by the GENESYS: hollow markers
+                    ax.plot([w for w, _ in fl], [v for _, v in fl], "o", ms=7, mfc=UI["surface"], mec=color,
+                            mew=1.8, zorder=4)
+                    flagged_any = True
                 lm = an.lambda_max([w for w, _ in ok], [v for _, v in ok])
                 self.tv_scan.insert("", "end", values=(p.label, f"{p.t_start / 60:.1f}",
                                                        f"{lm[0]:.0f}" if lm else "-", f"{lm[1]:.4f}" if lm else "-"))
@@ -2060,6 +2126,12 @@ class App:
                 ax.legend(loc="best")
             if samples:
                 title = "Blank-corrected scans" if sc.blank else "Scans (not blank-corrected)"
+            if sc.blank and not samples and sc.blank.flags:
+                flagged_any = True
+        if flagged_any:
+            ax.text(0.01, 0.01, "Hollow points: the GENESYS flagged the reading as outside its -0.1 to 2.5 A "
+                                "range (value kept).", transform=ax.transAxes, fontsize=8, color=UI["ink2"],
+                    va="bottom")
         ax.set_xlabel("Wavelength (nm)")
         ax.set_ylabel("Absorbance (A)")
         ax.set_title(title)

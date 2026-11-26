@@ -52,6 +52,7 @@ class Pass:
     number: int                     # sample pass number (1, 2, ...); 0 for the blank
     t_start: float | None = None    # seconds since the scan started
     points: dict = field(default_factory=dict)   # wavelength -> absorbance (NaN = skipped)
+    flags: set = field(default_factory=set)      # wavelengths read outside the instrument's range
 
     @property
     def label(self) -> str:
@@ -99,11 +100,15 @@ class ScanEngine:
             return None
         return self.wls[self.pos]
 
-    def record(self, a: float) -> None:
-        """Store the reading for the current target and advance."""
+    def record(self, a: float, flagged: bool = False) -> None:
+        """Store the reading for the current target and advance. `flagged` = the instrument said the
+        value is outside its photometric range (kept, but marked)."""
         if self.state != "running":
             raise RuntimeError("no scan point is waiting for a reading")
-        self.current.points[self.wls[self.pos]] = float(a)
+        wl = self.wls[self.pos]
+        self.current.points[wl] = float(a)
+        if flagged:
+            self.current.flags.add(wl)
         self._advance()
 
     def skip(self) -> None:
@@ -179,6 +184,7 @@ class ScanEngine:
             head.append("blank_A")
         for p in self.samples():
             head += [f"{p.label} raw_A (t={p.t_start:.0f}s)", f"{p.label} corrected_A"]
+        head.append("outside_range")
         rows = []
         for wl in self.wls:
             row = [wl]
@@ -189,5 +195,6 @@ class ScanEngine:
                 cw, ca = self.corrected(p)
                 cor = ca[cw.index(wl)] if wl in cw else ""
                 row += [raw, cor]
+            row.append(" ".join(p.label for p in self.passes if wl in p.flags))
             rows.append(row)
         return head, rows

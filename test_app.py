@@ -54,13 +54,14 @@ class TestDemoApp(unittest.TestCase):
         self.assertIn("Test run", a.user_presets.names())
         # automatic scan on the simulator: blank pass, then sample pass after Continue
         for k, v in (("start", "560"), ("stop", "620"), ("step", "20"), ("repeats", "2"), ("interval_min", "0"),
-                     ("settle_s", "0")):
+                     ("settle_s", "0.3")):
             a.v_sc[k].set(v)
         a.v_sim_c.set("10")
         a.sim_put_in()
         a.sim.cuvette.conc_m = 0.0                       # the blank: no dye
+        self.assertEqual(a._scan_mode(), "command")      # the demo scans with GTO, like the real GENESYS 20
         a.start_scan()
-        end = time.time() + 20
+        end = time.time() + 30
         while a._scan_wait != "hold" and time.time() < end:
             self.spin(0.05)
         self.assertEqual(a._scan_wait, "hold")           # waits for the cuvette swap

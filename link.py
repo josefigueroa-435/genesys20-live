@@ -6,9 +6,16 @@ How the real GENESYS 20 answers (firmware 2.10, captured 2026-11-25 at 9600 8N1,
     <- SND\\r\\n        echo of the query
     <- 0.0003\\r\\n     the answer (absorbance, 4 decimals)
     <- OK\\r\\n         end of the answer
-MODEL answers "GENESYS 20", REV answers "GENESYS 20 Revision = 2.10". The echo is skipped, answer
-lines are tagged with their query, and OK closes the query. A query that gets an answer but no OK
-is closed after ANSWER_IDLE_S of quiet, so firmware that leaves out the OK still works.
+MODEL answers "GENESYS 20", REV answers "GENESYS 20 Revision = 2.10". The echo is skipped and the
+answer lines are HELD until the closing word: OK releases them as normal readings, ER reports them in
+a "refused" event instead. For SND, "number + ER" means the reading is OUTSIDE the GENESYS 20's
+photometric range (-0.1 to 2.5 A, the "flashing display" condition): captured at 560 nm, -0.1810 + ER
+twice 3 s apart, and at 580 nm -0.2492 + ER, stable, so it is not a settling flag. The number is
+still the measured value; the app keeps it but marks it. A query that gets an answer but no OK/ER
+is released after ANSWER_IDLE_S of quiet, so firmware that leaves out the OK works.
+
+GTO <nm> (go to wavelength, whole nm) comes from Thermo's VISIONlite GENESYS 20 driver and was
+verified on Jose's instrument: "GTO 550" -> echo, "OK" in 0.4 s, then GTO 530 put it back exactly.
 
 The GENESYS echoes every character the moment it arrives, even in the middle of an answer (two
 queries sent back to back came out as "GENESRYS 20" / "OKE"). So queries wait in an outbox and only
@@ -19,7 +26,9 @@ Events for the GUI arrive on `Link.events` as tuples:
     ("out", t, bytes)                   raw query sent
     ("line", t, bytes, source, cmd)     a complete line; source is "print" or "reply" (cmd = the query)
     ("timeout", t, cmd)                 a query got no answer in time
-    ("refused", t, cmd)                 the instrument answered ER/ERR (command not supported)
+    ("refused", t, cmd, word, lines)    the instrument answered ER/ER nn/ERR: command not supported, or
+                                        (SND with a number in lines) a reading outside -0.1..2.5 A
+    ("done", t, cmd)                    an action (the configured GTO command) was acknowledged with OK
     ("error", t, message)               the port failed; the link has closed itself
     ("closed", t)
 t is time.time().
@@ -40,13 +49,14 @@ IDLE_FLUSH_S = 0.4
 
 
 class _Query:
-    __slots__ = ("cmd", "t_sent", "answered", "t_last")
+    __slots__ = ("cmd", "t_sent", "answered", "t_last", "lines")
 
     def __init__(self, cmd: str, t_sent: float):
         self.cmd = cmd
         self.t_sent = t_sent
         self.answered = False
         self.t_last = t_sent
+        self.lines: list[tuple[float, bytes]] = []
 
 
 def open_serial(s: SerialSettings):
@@ -198,30 +208,40 @@ class Link:
         now = time.monotonic()
         with self._lock:
             q = self._pending[0] if self._pending else None
-            if q is not None:
-                word = text.decode("latin-1").upper()
-                if word == q.cmd and not q.answered:
-                    q.t_last = now                 # the instrument echoing our query
-                    return
-                if word == "OK":
-                    self._pending.popleft()        # end of this query's answer
-                    if not q.answered:
-                        self.events.put(("timeout", time.time(), q.cmd))
-                    return
-                if word in ("ER", "ERR"):          # refused (GENESYS 20 says "ER", GENESYS 2/5 "ERR")
-                    self._pending.popleft()
-                    self.events.put(("refused", time.time(), q.cmd))
-                    return
-                q.answered = True
-                q.t_last = now
-        self.events.put(("line", time.time(), line, "reply" if q else "print", q.cmd if q else None))
+            if q is None:
+                self.events.put(("line", time.time(), line, "print", None))
+                return
+            word = text.decode("latin-1").upper()
+            if word == q.cmd and not q.answered:
+                q.t_last = now                     # the instrument echoing our query
+                return
+            if word == "OK":
+                self._pending.popleft()            # end of the answer: release what it said
+                self._release(q)
+                if q.cmd not in READ_ONLY_COMMANDS:
+                    self.events.put(("done", time.time(), q.cmd))      # an action (GTO) completed
+                elif not q.lines:
+                    self.events.put(("timeout", time.time(), q.cmd))   # a query with no answer
+                return
+            if word == "ER" or word.startswith("ER ") or word == "ERR":
+                self._pending.popleft()            # refused; after SND with a number: out of range
+                self.events.put(("refused", time.time(), q.cmd, word, [ln for _, ln in q.lines]))
+                return
+            q.answered = True
+            q.t_last = now
+            q.lines.append((time.time(), line))
+
+    def _release(self, q: _Query) -> None:
+        for t, line in q.lines:
+            self.events.put(("line", t, line, "reply", q.cmd))
 
     def _expire(self, now: float) -> None:
         with self._lock:
             while self._pending:
                 q = self._pending[0]
                 if q.answered and now - q.t_last > ANSWER_IDLE_S:
-                    self._pending.popleft()        # answered, no OK came: close it quietly
+                    self._pending.popleft()        # answered, no OK/ER came: release and close
+                    self._release(q)
                 elif not q.answered and now - q.t_sent > REPLY_TIMEOUT_S:
                     self._pending.popleft()
                     self.events.put(("timeout", time.time(), q.cmd))

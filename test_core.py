@@ -311,6 +311,45 @@ class TestRealProtocol(unittest.TestCase):
         lines = [(e[4], g.decode(e[2])) for e in evs if e[0] == "line"]
         self.assertEqual(lines, [("SND", "1.3183")])          # ER is not mistaken for an answer
 
+    def test_reading_followed_by_er_is_dropped(self):
+        """Captured from the real GENESYS 20: SND right after GTO answers a number, then ER."""
+        port = ScriptedPort({b"GTO 550": b"GTO 550\r\nOK\r\n", b"SND": b"SND\r\n-0.1338\r\nER\r\n"})
+        link = Link()
+        link.open(g.SerialSettings(port="X"), port=port)
+        try:
+            link.allow_wavelength_command("GTO {wl}")
+            link.send(link.wavelength_command(550))
+            link.send("SND")
+            end, evs = time.time() + 1.5, []
+            while time.time() < end:
+                try:
+                    evs.append(link.events.get(timeout=0.05))
+                except Exception:
+                    pass
+        finally:
+            link.close()
+        kinds = [(e[0], e[2]) for e in evs if e[0] in ("done", "refused", "line")]
+        self.assertIn(("done", "GTO 550"), kinds)
+        refused = [e for e in evs if e[0] == "refused" and e[2] == "SND"][0]
+        self.assertEqual(refused[4], [b"-0.1338"])                  # the value travels with the flag
+        self.assertFalse(any(e[0] == "line" for e in evs))         # ...never as a normal reading
+
+    def test_simulator_gto_and_range_flag(self):
+        sim = g.SimulatedGenesys(noise=0.0, read_timeout=0.005)
+        sim.write(b"GTO 600\r\n")
+        sim.write(b"SND\r\n")
+        out = sim.read(500)
+        self.assertIn(b"GTO 600\r\nOK\r\n", out)
+        self.assertTrue(out.endswith(b"OK\r\n"))                   # in range: a normal reading
+        self.assertEqual(sim.wl, 600.0)
+        sim.cuvette.conc_m = 5e-5                                   # A ~ 4: above the 2.5 A limit
+        sim.wl = 590.0
+        sim.write(b"SND\r\n")
+        self.assertTrue(sim.read(500).endswith(b"ER\r\n"))         # value + ER, like the real one
+        sim.write(b"GTO 200\r\n")                                   # outside the GENESYS 20 range
+        self.assertTrue(sim.read(500).endswith(b"ER\r\n"))
+        self.assertEqual(sim.wl, 590.0)
+
     def test_ok_without_answer_is_a_miss(self):
         evs = self.run_query(ScriptedPort({b"SND": b"SND\r\nOK\r\n"}), "SND")
         self.assertTrue(any(e[0] == "timeout" and e[2] == "SND" for e in evs))

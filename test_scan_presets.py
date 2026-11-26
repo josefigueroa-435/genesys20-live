@@ -48,7 +48,21 @@ class TestScanEngine(unittest.TestCase):
             self.assertAlmostEqual(got, want)
         head, rows = eng.table()
         self.assertEqual(head[:2], ["wavelength_nm", "blank_A"])
-        self.assertAlmostEqual(rows[1][-1], 0.60)
+        self.assertEqual(head[-1], "outside_range")
+        self.assertAlmostEqual(rows[1][-2], 0.60)
+
+    def test_flagged_points(self):
+        eng = ScanEngine(ScanConfig(560, 580, 20, blank_first=True), clock=Clock())
+        eng.start()
+        eng.record(-0.1810, flagged=True)                 # real GENESYS 20 values at 560/580 nm, with ER
+        eng.record(-0.2492, flagged=True)
+        eng.record(0.40)
+        eng.record(0.35)
+        self.assertEqual(eng.blank.flags, {560, 580})
+        wl, a = eng.corrected(eng.samples()[0])
+        self.assertAlmostEqual(a[0], 0.40 + 0.1810)        # the flagged blank is still subtracted
+        head, rows = eng.table()
+        self.assertEqual(rows[0][-1], "Blank")
 
     def test_repeats_wait_for_interval(self):
         clk = Clock()

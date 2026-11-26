@@ -71,14 +71,24 @@ Set the range, step and number of scans (for example 3 scans every 5 min to watc
 
 - **Blank pass first** reads the blank at every wavelength and subtracts it from each scan
   (single-beam correction). The app pauses for you to swap in the sample.
-- **Guided** (the real GENESYS today):
+- **Automatic** (default): the GENESYS moves itself.
+  - The app sends `GTO <nm>`, the go-to-wavelength command from Thermo's VISIONlite GENESYS 20 driver,
+    which Thermo said to use. It waits for the instrument's OK, waits **Settle** seconds (1.5 s
+    works), then reads with `SND`.
+  - When a scan ends, the GENESYS returns to the wavelength in the Sample box.
+  - Verified on the real instrument (2026-11-25): 480-600 nm in 20 nm steps with a blank pass took
+    41 s, and reading the blank twice gave a corrected spectrum within ±0.0007 A of zero.
+- **Flagged readings:** when a reading is outside the GENESYS 20's photometric range (−0.1 to 2.5 A),
+  the instrument answers the number and then `ER`. The value is kept, drawn as a hollow point, and
+  listed in the CSV's `outside_range` column. Blanks often fall below −0.1 A away from the zeroing
+  wavelength, and those values are still needed for the subtraction.
+- **Guided:**
   - The big prompt says which wavelength to set.
   - Set it with the nm keys and press **Print** (Printer setup = Serial, Print WL = Yes).
   - The printed wavelength is checked against the target.
-  - **Read now (SND)** works too.
-- **Automatic** needs the set-wavelength command from Thermo's GENESYS 20 RS232 command set
-  (ask Thermo technical support). Enter it under **Set-wavelength command...**. It is never guessed,
-  because the same port accepts calibration-table uploads. The demo's simulator scans automatically.
+- The app only ever sends `MODEL`, `REV`, `SND` and `GTO <325-1100>`. The other commands in
+  Thermo's driver (ZER, TRN, CCM, ECH) are not used, and the GENESYS 2/5 commands (`WAVELENGTH`,
+  `DATA`, `SCAN`) are refused by the GENESYS 20 with `ER`.
 - Results: blank-corrected overlay (older scans lighter), λmax per scan, **Export CSV**.
 
 ## Saving and sharing runs (Runs tab)

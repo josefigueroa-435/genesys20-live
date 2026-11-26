@@ -18,7 +18,13 @@ A set-wavelength command must exist (Datalyse stepped wavelengths for its scans)
 never guess it, because this port also accepts wavelength-calibration table uploads (MONOTAB).
 Tested 2026-11-25 with Jose's OK: the GENESYS 2/5 commands WAVELENGTH (query), DATA and WAVELENGTH 550
 are all refused by this GENESYS 20 with "ER" (echo, then "ER"), and the wavelength does not move.
-The GENESYS 20's own RS232 command set has to come from Thermo.
+Thermo's VISIONlite 5.4 GENESYS 20 driver (clsSP_Genesys20; Thermo said to use it) sends MODEL, REV,
+SND, GTO <nm>, ZER, TRN, CCM 0/2, ECH 1 and handles ER / ER 17 / ER 18. GTO <whole nm> was verified:
+"GTO 550" -> OK in 0.4 s and the instrument moved; "GTO 530" returned it exactly. SND answering a
+number followed by "ER" means the reading is outside the photometric range -0.1..2.5 A (stable over
+time: 560 nm gave -0.1810 + ER twice, 3 s apart); the number is kept and flagged.
+Only GTO is used by this app; ZER/TRN/CCM/ECH are not sent.
+A real automatic scan (500-540 nm, GTO + 1.5 s settle + SND) ran on Jose's GENESYS 20 on 2026-11-25.
 
 Wiring lesson: the GENESYS is DCE (transmits on pin 2). Jose's DTECH female USB adapter is ALSO wired
 DCE, so it only works through a male-to-female null-modem adapter.
@@ -286,6 +292,7 @@ class SimulatedGenesys:
         self._out = bytearray()
         self._in = bytearray()
         self.received: list[str] = []
+        self.range = (-0.1, 2.5)      # like the real GENESYS 20: SND outside this -> value + "ER"
 
     # serial.Serial look-alike ------------------------------------------------
     @property
@@ -326,14 +333,27 @@ class SimulatedGenesys:
     def _command(self, cmd: str):
         self.received.append(cmd)
         self._out += cmd.encode() + self.term          # the real instrument echoes each query
+        m = re.fullmatch(r"GTO (\d{3,4})", cmd)
+        if m:
+            wl = float(m.group(1))
+            if not 325 <= wl <= 1100:
+                self._out += b"ER" + self.term
+                return
+            self.wl = wl
+            self._out += b"OK" + self.term
+            return
         if cmd == "SND":
-            self._out += f"{self.absorbance():.4f}".encode() + self.term
+            a = self.absorbance()
+            self._out += f"{a:.4f}".encode() + self.term
+            if not self.range[0] <= a <= self.range[1]:
+                self._out += b"ER" + self.term           # outside the photometric range: flagged
+                return
         elif cmd == "MODEL":
             self._out += b"GENESYS 20 (SIMULATED)" + self.term
         elif cmd == "REV":
             self._out += b"GENESYS 20 Revision = 2.10-SIM" + self.term
         else:
-            self._out += b"?" + self.term
+            self._out += b"ER" + self.term               # what the real GENESYS 20 says to unknown commands
             return
         self._out += b"OK" + self.term
 
