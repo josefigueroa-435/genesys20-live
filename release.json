@@ -1,8 +1,8 @@
 {
-  "version": "0.5.0",
-  "commit": "896a7a5b4afc39d348584d2338a952c212ea06fc",
-  "date": "2026-11-26T00:09:31+00:00",
-  "notes": "Automatic wavelength scans: the GENESYS 20 now moves itself (GTO), with blank correction and out-of-range flags",
+  "version": "0.5.1",
+  "commit": "3d242be3cf7765a21f8d5625ef6cf1a18f4968e8",
+  "date": "2026-11-26T00:17:40+00:00",
+  "notes": "Hand-off package: printable user guide and READ ME FIRST",
   "files": [
     {
       "path": "app.py",
@@ -46,7 +46,7 @@
     },
     {
       "path": "version.py",
-      "sha256": "7bd4464f52d80ddc5ba17f3d61cc2295fbec0c4487361f83bbd7923737f726c4",
+      "sha256": "edfd73f05d816748b44920076be94aaec62b41e74173e50a5e7337c607215fcd",
       "size": 96
     },
     {
@@ -63,6 +63,16 @@
       "path": "README.md",
       "sha256": "b976187852dc57458cc93b38c92e9e2711d10ae19b071fdddf5a3a8af39dfe8b",
       "size": 9697
+    },
+    {
+      "path": "READ ME FIRST.txt",
+      "sha256": "a4c1f3fae0f843f5c0e357622d40bc53ee975764406c45f05f1188ab84c101cb",
+      "size": 2801
+    },
+    {
+      "path": "GENESYS 20 Live - Guide.pdf",
+      "sha256": "594c3e3cd695a92109530dba105edc5f5da211bfea82408c8a0fdf0e03b966eb",
+      "size": 333569
     },
     {
       "path": "GENESYS 20 Live.bat",
@@ -108,6 +118,11 @@
       "path": "tools/query_and_listen.py",
       "sha256": "eb82e5eb63febd566fae96a926d23c1e7e27b6e8b80d9459bf9485dce8290271",
       "size": 1250
+    },
+    {
+      "path": "tools/gto_test.py",
+      "sha256": "cc1d9ef5df1d770a617c2650872f5a9d85e0cc3a2d991f9d9c1b6381540f567e",
+      "size": 2711
     }
   ]
 }
