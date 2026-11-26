@@ -1,23 +1,23 @@
 {
-  "version": "0.4.1",
-  "commit": "20371bc9a10086057ba182f0d3f3eb56a8f84238",
-  "date": "2026-11-25T23:44:57+00:00",
-  "notes": "Recognizes the GENESYS 20's ER (not supported) reply",
+  "version": "0.5.0",
+  "commit": "896a7a5b4afc39d348584d2338a952c212ea06fc",
+  "date": "2026-11-26T00:09:31+00:00",
+  "notes": "Automatic wavelength scans: the GENESYS 20 now moves itself (GTO), with blank correction and out-of-range flags",
   "files": [
     {
       "path": "app.py",
-      "sha256": "9255979f834b9b3ce03608df6c9ef038207653b74a83fc7c98010ee092dd89e9",
-      "size": 121028
+      "sha256": "a5ec177a76bffafd401e93fbdb93e3547e6e717d92b56a215b288c0b6c78caac",
+      "size": 125501
     },
     {
       "path": "genesys.py",
-      "sha256": "6600f82a9200d64eb228f2f7773addf639c537ff8b26302e7a77a18b651d41ca",
-      "size": 13096
+      "sha256": "4ca68966ee2459cbbde221935c2156de6e487879958dc834c38145319deb481a",
+      "size": 14328
     },
     {
       "path": "link.py",
-      "sha256": "2863b3bdb45290ebba955aa7c4c1bf505a048a8ef399a4d1689fdfeddcf903a4",
-      "size": 9953
+      "sha256": "ce15368fa0b1a24f26f79bb976d5f79d28d62e35b05a949e4611dafd380fd108",
+      "size": 11271
     },
     {
       "path": "analysis.py",
@@ -31,8 +31,8 @@
     },
     {
       "path": "scan.py",
-      "sha256": "25e8068d3fc01cbe6830ae77e5d63358df659f1447f24971c15454a78432b633",
-      "size": 7600
+      "sha256": "b01824028911c3712bef1a3641884cb0d41211c48b66c5fe0ae1675a1c65f25e",
+      "size": 8017
     },
     {
       "path": "runs.py",
@@ -46,7 +46,7 @@
     },
     {
       "path": "version.py",
-      "sha256": "237146fa68b05caa944681974ffa07b72084b8b26b67ff5271f4eb7fe961f187",
+      "sha256": "7bd4464f52d80ddc5ba17f3d61cc2295fbec0c4487361f83bbd7923737f726c4",
       "size": 96
     },
     {
@@ -61,8 +61,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "a2d171b4755cabd3ab4987fb718d9684e78721573de23ed75e34f10cb96a4ba8",
-      "size": 8873
+      "sha256": "b976187852dc57458cc93b38c92e9e2711d10ae19b071fdddf5a3a8af39dfe8b",
+      "size": 9697
     },
     {
       "path": "GENESYS 20 Live.bat",
